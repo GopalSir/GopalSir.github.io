@@ -1,0 +1,12 @@
+1. Read complete architecturel arrangement of C:\Users\Gaurav\Documents\IISC\mtech_project\IUI_Project\lite6_urdf-main\UFACTORY_Lite6\Assets\bimanual\bimanual_pi_client2_camera.py
+2. Prepare implementation plan for migrating the same solution on android table, via html broswer
+3. the same client code should now work on a tablet usin html brower.
+4. Mandatory features:
+4.1 Same UI in terms of appearance
+4.2 Responsive elements, so that visuals are resolution sensitive and scale accordingly
+4.3 Give an option to record an entire episode, using button on screen and ability to save the episide along with video and following information
+    record start time, record end time, total time, 
+4.4 Full screen option. Exit option 
+4.5 All mathematics,gesture recognition logic remains saame.  check after implementation
+4.6 Show only 1 stream at a time, but recieve both. For first and third mode, show first camera steram on full screen, 
+    for 2nd and 4th mode, show the camera2 stream on screen.  This is to avoid cognitive load. 

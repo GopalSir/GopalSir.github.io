@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>Lite 6 — Robot Cockpit View</title>
+  <link rel="stylesheet" href="css/cockpit.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="cockpit-root">
+    <div id="title-bar">Lite 6 — Robot Cockpit</div>
+
+    <canvas id="main-canvas"></canvas>
+
+    <div id="boot-overlay">
+      <div class="spinner"></div>
+      <span id="boot-msg">Tap Start to enable hand tracking</span>
+      <button type="button" id="btn-start" class="toolbar-btn boot-btn">Start</button>
+    </div>
+
+    <div id="advanced-wrap">
+      <button type="button" id="advanced-toggle" class="toolbar-btn">Calib</button>
+      <div id="advanced-panel">
+        <div>Hand-eye (±5°)</div>
+        <div class="row">
+          <button type="button" id="btn-roll-minus" class="toolbar-btn">R−</button>
+          <button type="button" id="btn-roll-plus" class="toolbar-btn">R+</button>
+          <button type="button" id="btn-pitch-minus" class="toolbar-btn">P−</button>
+          <button type="button" id="btn-pitch-plus" class="toolbar-btn">P+</button>
+          <button type="button" id="btn-yaw-minus" class="toolbar-btn">Y−</button>
+          <button type="button" id="btn-yaw-plus" class="toolbar-btn">Y+</button>
+        </div>
+        <div id="calib-label">roll 0°  pitch 0°  yaw 0°</div>
+      </div>
+    </div>
+
+    <div id="toolbar">
+      <div id="status-strip">
+        <span><span class="dot red" id="robot-dot"></span><span id="robot-label">Robot: offline</span></span>
+        <span><span class="dot red" id="cam1-dot"></span>Cam1</span>
+        <span><span class="dot red" id="cam2-dot"></span>Cam2</span>
+      </div>
+      <button type="button" id="btn-connect" class="toolbar-btn">Connect</button>
+      <button type="button" id="btn-estop" class="toolbar-btn">E-Stop</button>
+      <button type="button" id="btn-record" class="toolbar-btn">Record</button>
+      <button type="button" id="btn-fullscreen" class="toolbar-btn">Fullscreen</button>
+      <button type="button" id="btn-exit" class="toolbar-btn">Exit</button>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

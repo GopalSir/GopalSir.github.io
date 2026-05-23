@@ -20,14 +20,16 @@ export function createCameraReceiver(url, label = 'cam') {
     const blob = await fetch(`data:image/jpeg;base64,${b64}`).then((r) =>
       r.blob()
     );
-    if (latestBitmap) {
+    const newBitmap = await createImageBitmap(blob);
+    const oldBitmap = latestBitmap;
+    latestBitmap = newBitmap;
+    if (oldBitmap) {
       try {
-        latestBitmap.close();
+        oldBitmap.close();
       } catch (_) {
         /* ignore */
       }
     }
-    latestBitmap = await createImageBitmap(blob);
     frameCount++;
     notify();
   }

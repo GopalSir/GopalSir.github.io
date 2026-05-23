@@ -2,7 +2,8 @@
  * HUD overlay — port of draw_hud() in bimanual_pi_client2_camera.py.
  */
 
-import { DEADZONE_RADIUS_PX, REF_WIDTH } from './robot-math.js';
+import { DEADZONE_RADIUS_PX } from './robot-math.js';
+import { REF_WIDTH } from './config.js';
 import { drawModeGizmo } from './gizmo.js';
 
 function scalePt(pt, w, h) {

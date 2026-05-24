@@ -225,3 +225,22 @@ body {
   color: rgba(255, 255, 255, 0.45);
   pointer-events: none;
 }
+
+#debug-panel {
+  position: absolute;
+  left: 8px;
+  bottom: 104px;
+  z-index: 14;
+  max-width: min(520px, calc(100vw - 16px));
+  max-height: 35vh;
+  overflow: hidden;
+  padding: 8px 10px;
+  border: 1px solid rgba(80, 180, 255, 0.55);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #9ee7ff;
+  font-size: clamp(9px, 2vw, 12px);
+  line-height: 1.35;
+  white-space: pre-wrap;
+  pointer-events: none;
+}

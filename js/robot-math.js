@@ -183,6 +183,19 @@ export function createRobotController() {
     lastModeSwitchMs: 0,
     velCmd: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 },
     neutralCenterPx: null,
+    lastDebug: {
+      handCount: 0,
+      labels: [],
+      leftExt: [false, false, false, false],
+      leftScores: [0, 0, 0, 0],
+      leftModeNumber: 0,
+      candidateMode: 'IDLE',
+      activeMode: 'IDLE',
+      clutchActive: true,
+      switchProb: 1,
+      vGain: 0,
+      uDist: 0,
+    },
     prevClutchActive: true,
     gripperState: 'OPEN',
     lastGripperState: 'OPEN',
@@ -239,11 +252,16 @@ export function createRobotController() {
 
       const landmarks = results?.landmarks ?? results?.handLandmarks ?? [];
       const handednesses = results?.handednesses ?? results?.handedness ?? [];
+      const debugLabels = [];
+      let debugLeftScores = [...this.extScoreEma];
+      let debugLeftExt = [...this.extState];
+      let debugLeftModeNumber = 0;
 
       if (landmarks.length) {
         for (let idx = 0; idx < landmarks.length; idx++) {
           const lm = landmarks[idx];
           const label = handednesses[idx]?.[0]?.categoryName;
+          debugLabels.push(label || 'unknown');
 
           if (label === 'Right') {
             clutchActive = false;
@@ -292,6 +310,8 @@ export function createRobotController() {
                 (this.extState[i] ? EXT_OFF_THRESH : EXT_ON_THRESH);
               ext.push(this.extState[i]);
             }
+            debugLeftScores = [...this.extScoreEma];
+            debugLeftExt = [...ext];
 
             if (
               ext[0] &&
@@ -299,12 +319,16 @@ export function createRobotController() {
               !ext[2] &&
               !ext[3]
             ) {
+              debugLeftModeNumber = 1;
               rightMode = 'YZ Plane';
             } else if (ext[0] && ext[1] && !ext[2] && !ext[3]) {
+              debugLeftModeNumber = 2;
               rightMode = 'X Axis';
             } else if (ext[0] && ext[1] && ext[2] && !ext[3]) {
+              debugLeftModeNumber = 3;
               rightMode = 'Yaw/Pitch';
             } else if (ext[0] && ext[1] && ext[2] && ext[3]) {
+              debugLeftModeNumber = 4;
               rightMode = 'Roll';
             }
           }
@@ -391,6 +415,19 @@ export function createRobotController() {
       }
 
       this.prevClutchActive = clutchActive;
+      this.lastDebug = {
+        handCount: landmarks.length,
+        labels: debugLabels,
+        leftExt: debugLeftExt,
+        leftScores: debugLeftScores,
+        leftModeNumber: debugLeftModeNumber,
+        candidateMode: rightMode,
+        activeMode: this.activeMode,
+        clutchActive,
+        switchProb,
+        vGain,
+        uDist,
+      };
 
       return {
         clutchActive,

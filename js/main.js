@@ -2,7 +2,13 @@
  * Lite 6 bimanual tablet web cockpit — entry point.
  */
 
-import { CAMERA_WS_URL, CAMERA2_WS_URL } from './config.js';
+import {
+  CAMERA_WS_URL,
+  CAMERA2_WS_URL,
+  HAND_MODEL_PATH,
+  MEDIAPIPE_WASM_BASE,
+  cameraIndexForMode,
+} from './config.js';
 import {
   createRobotController,
   ROBOT_SEND_PERIOD_S,
@@ -40,10 +46,21 @@ const dom = {
   btnStart: document.getElementById('btn-start'),
 };
 
+const DEBUG = true;
+const DEBUG_LOG_PREFIX = '[cockpit-debug]';
+const debugPanel = document.createElement('pre');
+debugPanel.id = 'debug-panel';
+dom.root.appendChild(debugPanel);
+
 let stopFlag = false;
 let gesturesReady = false;
 let lastRobotSendTs = 0;
 let rafId = null;
+let lastDebugPanelUpdate = 0;
+let lastModeLogged = null;
+let lastCameraLogged = null;
+let lastCam1FrameLogged = 0;
+let lastCam2FrameLogged = 0;
 
 const controller = createRobotController();
 const robot = createRobotConnection();
@@ -52,6 +69,49 @@ const cam2 = createCameraReceiver(CAMERA2_WS_URL, 'cam2');
 const gestures = createGestureTracker();
 const compositor = createCompositor(dom.canvas);
 const recorder = createEpisodeRecorder(dom.canvas);
+
+function debugLog(event, data = {}) {
+  if (!DEBUG) return;
+  console.info(DEBUG_LOG_PREFIX, event, data);
+}
+
+function formatPt(pt) {
+  if (!pt) return 'null';
+  return `${pt.x},${pt.y}`;
+}
+
+function bootDebugSnapshot() {
+  return {
+    href: window.location.href,
+    secureContext: window.isSecureContext,
+    mediaDevices: !!navigator.mediaDevices,
+    getUserMedia: !!navigator.mediaDevices?.getUserMedia,
+    userAgent: navigator.userAgent,
+    camera1: CAMERA_WS_URL,
+    camera2: CAMERA2_WS_URL,
+    handModel: HAND_MODEL_PATH,
+    wasmBase: MEDIAPIPE_WASM_BASE,
+  };
+}
+
+function updateDebugPanel({ tsMs, motion, hudState, selectedCamera }) {
+  if (!DEBUG || tsMs - lastDebugPanelUpdate < 250) return;
+  lastDebugPanelUpdate = tsMs;
+
+  const dbg = controller.lastDebug;
+  const scores = dbg.leftScores.map((v) => v.toFixed(2)).join(', ');
+  const ext = dbg.leftExt.map((v) => (v ? '1' : '0')).join('');
+
+  debugPanel.textContent = [
+    `hands=${dbg.handCount} labels=${dbg.labels.join(',') || '-'}`,
+    `leftExt=${ext} modeNo=${dbg.leftModeNumber} scores=[${scores}]`,
+    `candidate=${dbg.candidateMode} active=${hudState.activeMode}`,
+    `camera=${selectedCamera} clutch=${hudState.clutchActive ? 'LOCKED' : 'ACTIVE'}`,
+    `neutral=${formatPt(hudState.neutralCenterPx)} leftWrist=${formatPt(hudState.leftWristPx)}`,
+    `switchProb=${motion.switchProb.toFixed(2)} vGain=${motion.vGain.toFixed(2)} uDist=${motion.uDist.toFixed(2)}`,
+    `camFrames=${cam1.frameCount}/${cam2.frameCount} camConn=${cam1.connected}/${cam2.connected}`,
+  ].join('\n');
+}
 
 function setDot(el, state) {
   el.className = 'dot ' + state;
@@ -72,9 +132,23 @@ function updateRobotStatus({ connected, armed }) {
 
 cam1.onUpdate(() => {
   setDot(dom.cam1Dot, cam1.connected ? 'green' : 'red');
+  if (!cam1.connected || cam1.frameCount <= 3 || cam1.frameCount - lastCam1FrameLogged >= 120) {
+    lastCam1FrameLogged = cam1.frameCount;
+    debugLog('camera-1-update', {
+      connected: cam1.connected,
+      frameCount: cam1.frameCount,
+    });
+  }
 });
 cam2.onUpdate(() => {
   setDot(dom.cam2Dot, cam2.connected ? 'green' : 'red');
+  if (!cam2.connected || cam2.frameCount <= 3 || cam2.frameCount - lastCam2FrameLogged >= 120) {
+    lastCam2FrameLogged = cam2.frameCount;
+    debugLog('camera-2-update', {
+      connected: cam2.connected,
+      frameCount: cam2.frameCount,
+    });
+  }
 });
 
 function updateCalibLabel() {
@@ -100,17 +174,24 @@ function showOverlay(msg) {
 async function startGestures() {
   dom.btnStart.disabled = true;
   showOverlay('Loading hand tracking…');
+  debugLog('start-gestures-clicked');
   try {
     await gestures.init((msg) => {
       dom.overlayMsg.textContent = msg;
+      debugLog('gesture-init-progress', { msg });
     });
     gesturesReady = true;
+    debugLog('gesture-init-ready');
     hideOverlay();
     if (!rafId) loop();
   } catch (e) {
     console.error(e);
     gesturesReady = false;
     dom.btnStart.disabled = false;
+    debugLog('gesture-init-error', {
+      message: e?.message,
+      stack: e?.stack,
+    });
     dom.overlayMsg.textContent =
       e?.message ||
       'Camera / MediaPipe failed. Use HTTPS and allow camera access.';
@@ -118,6 +199,7 @@ async function startGestures() {
 }
 
 function boot() {
+  debugLog('boot', bootDebugSnapshot());
   dom.overlayMsg.textContent =
     'Robot cameras loading. Tap Start to enable hand tracking.';
   dom.overlay.classList.remove('hidden');
@@ -192,6 +274,25 @@ function loop() {
     leftWristPx: motion.leftWristPx,
     manualStopHold: controller.manualStopHold,
   };
+  const selectedCamera = cameraIndexForMode(hudState.activeMode);
+
+  if (hudState.activeMode !== lastModeLogged) {
+    lastModeLogged = hudState.activeMode;
+    debugLog('active-mode-change', {
+      activeMode: hudState.activeMode,
+      candidateMode: motion.rightMode,
+      selectedCamera,
+      handDebug: controller.lastDebug,
+    });
+  }
+  if (selectedCamera !== lastCameraLogged) {
+    lastCameraLogged = selectedCamera;
+    debugLog('camera-selection-change', {
+      selectedCamera,
+      activeMode: hudState.activeMode,
+      expected: 'mode 1/3 -> camera 1, mode 2/4 -> camera 2',
+    });
+  }
 
   compositor.render({
     cam1: cam1.bitmap,
@@ -199,6 +300,7 @@ function loop() {
     hudState,
     gestureTracker: gesturesReady ? gestures : null,
   });
+  updateDebugPanel({ tsMs, motion, hudState, selectedCamera });
 
   rafId = requestAnimationFrame(loop);
 }
@@ -301,12 +403,22 @@ if (typeof ResizeObserver !== 'undefined') {
 
 window.addEventListener('error', (e) => {
   console.error(e);
+  debugLog('window-error', {
+    message: e.message,
+    filename: e.filename,
+    lineno: e.lineno,
+    colno: e.colno,
+  });
   showOverlay(`Error: ${e.message || 'failed to load'}`);
   if (dom.btnStart) dom.btnStart.disabled = false;
 });
 
 window.addEventListener('unhandledrejection', (e) => {
   console.error(e.reason);
+  debugLog('unhandled-rejection', {
+    reason: e.reason?.message || e.reason,
+    stack: e.reason?.stack,
+  });
   showOverlay(`Error: ${e.reason?.message || e.reason || 'unknown'}`);
   if (dom.btnStart) dom.btnStart.disabled = false;
 });

@@ -64,7 +64,7 @@ source "$VENV_PATH"
 
 # Start Camera Server with its own rotated log
 log "Starting Camera Server on port 8001..."
-python3 "$CAMERA_SCRIPT" --device-a /dev/video0 --device-b /dev/video2 --port-a 8001 --port-b 8002 --width 1280 --height 720 --capture-fps 30 --fps 24 >> "$CAM_LOGFILE" 2>&1 &
+python3 "$CAMERA_SCRIPT" --device-a /dev/video0 --device-b /dev/video2 --port-a 8001 --port-b 8002 --width 1280 --height 720 --rtc-width 640 --rtc-height 360 --capture-fps 30 --fps 15 >> "$CAM_LOGFILE" 2>&1 &
 CAMERA_PID=$!
 
 START_TIME=$(date +%s)

@@ -113,36 +113,66 @@ class LatestFrameVideoTrack(VideoStreamTrack):
     WebRTC VideoStreamTrack backed by a latest-frame holder.
 
     This track paces output at target_fps and emits the freshest capture frame.
+    Captured frames are resized to ``rtc_width x rtc_height`` before encoding so
+    the Pi's software VP8/H264 encoder stays well under saturation.
+
+    pause/resume is implemented as a flag on the track instead of teardown so
+    the underlying RTP sender + encoder stay attached. This avoids leaving one
+    peer connection stuck after a pause→resume cycle.
     """
 
-    def __init__(self, holder: FrameHolder, width: int, height: int, target_fps: int):
+    IDLE_INTERVAL_S = 1.0  # while paused, emit a heartbeat frame once a second
+
+    def __init__(
+        self,
+        holder: FrameHolder,
+        rtc_width: int,
+        rtc_height: int,
+        target_fps: int,
+    ):
         super().__init__()
         self.holder = holder
-        self.width = max(1, int(width))
-        self.height = max(1, int(height))
+        self.rtc_width = max(1, int(rtc_width))
+        self.rtc_height = max(1, int(rtc_height))
         self.target_fps = max(1, int(target_fps))
         self.interval_s = 1.0 / float(self.target_fps)
         self.next_deadline = time.perf_counter()
-        self.last_frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        self.last_frame = np.zeros((self.rtc_height, self.rtc_width, 3), dtype=np.uint8)
+        self.paused = False
+        self.frames_sent = 0
+
+    def _resize_if_needed(self, frame):
+        h, w = frame.shape[:2]
+        if w == self.rtc_width and h == self.rtc_height:
+            return frame
+        return cv2.resize(
+            frame,
+            (self.rtc_width, self.rtc_height),
+            interpolation=cv2.INTER_AREA,
+        )
 
     async def recv(self):
         now = time.perf_counter()
         sleep_for = self.next_deadline - now
         if sleep_for > 0:
             await asyncio.sleep(sleep_for)
+
+        interval = self.IDLE_INTERVAL_S if self.paused else self.interval_s
         self.next_deadline = max(
-            self.next_deadline + self.interval_s,
+            self.next_deadline + interval,
             time.perf_counter(),
         )
 
-        frame, _ = self.holder.snapshot()
-        if frame is not None:
-            self.last_frame = frame
+        if not self.paused:
+            frame, _ = self.holder.snapshot()
+            if frame is not None:
+                self.last_frame = self._resize_if_needed(frame)
 
         video = VideoFrame.from_ndarray(self.last_frame, format="bgr24")
         pts, time_base = await self.next_timestamp()
         video.pts = pts
         video.time_base = time_base
+        self.frames_sent += 1
         return video
 
 
@@ -165,6 +195,10 @@ class CameraServer:
         self.stream_fps = args.fps
         self.width = args.width
         self.height = args.height
+        # Encoded WebRTC frame size (defaults smaller than capture so the Pi's
+        # software encoder doesn't saturate). Capture stays at width x height.
+        self.rtc_width = max(1, int(getattr(args, "rtc_width", 640) or 640))
+        self.rtc_height = max(1, int(getattr(args, "rtc_height", 360) or 360))
 
         ice_servers = []
         for url in args.stun_url:
@@ -237,7 +271,12 @@ class CameraServer:
 
     def _new_track(self, label):
         holder = self._holder_for_label(label)
-        return LatestFrameVideoTrack(holder, self.width, self.height, self.stream_fps)
+        return LatestFrameVideoTrack(
+            holder,
+            rtc_width=self.rtc_width,
+            rtc_height=self.rtc_height,
+            target_fps=self.stream_fps,
+        )
 
     async def _wait_for_ice(self, session: ClientSession, timeout_s=5.0):
         pc = session.pc
@@ -277,34 +316,22 @@ class CameraServer:
             self.log(f"[WS] Closed peer (cam-{session.label}): {reason}")
 
     async def _set_session_active(self, session: ClientSession, active: bool):
+        """
+        Toggle pause/resume by flipping a flag on the track itself.
+
+        Avoids replaceTrack(None)/replaceTrack(new) churn that previously left
+        one peer connection stuck after a pause→resume cycle (cam1 freeze).
+        """
         changed = session.active != active
         session.active = active
 
-        if not session.pc or not session.sender:
-            return
+        if session.track is not None:
+            session.track.paused = not active
 
-        if active:
-            if session.track is None:
-                session.track = self._new_track(session.label)
-            try:
-                await _await_if_needed(session.sender.replaceTrack(session.track))
-                if changed:
-                    self.log(f"[WS] Client resumed (cam-{session.label}): {session.ws.remote_address}")
-            except Exception as exc:
-                self.log(f"[WS] Resume failed (cam-{session.label}): {exc}")
-        else:
-            try:
-                await _await_if_needed(session.sender.replaceTrack(None))
-                if session.track:
-                    try:
-                        session.track.stop()
-                    except Exception:
-                        pass
-                    session.track = None
-                if changed:
-                    self.log(f"[WS] Client paused (cam-{session.label}): {session.ws.remote_address}")
-            except Exception as exc:
-                self.log(f"[WS] Pause failed (cam-{session.label}): {exc}")
+        if changed:
+            action = "resumed" if active else "paused"
+            who = getattr(session.ws, "remote_address", "?")
+            self.log(f"[WS] Client {action} (cam-{session.label}): {who}")
 
     async def _handle_offer(self, session: ClientSession, sdp: str):
         if not sdp:
@@ -343,6 +370,11 @@ class CameraServer:
             await pc.setLocalDescription(answer)
             await self._wait_for_ice(session)
 
+            # If client already requested pause before the offer completed,
+            # carry that state forward into the freshly created track.
+            if session.track is not None and not session.active:
+                session.track.paused = True
+
             await self._send_json(
                 session.ws,
                 {
@@ -350,10 +382,6 @@ class CameraServer:
                     "sdp": pc.localDescription.sdp if pc.localDescription else answer.sdp,
                 },
             )
-
-            # Respect paused state if client requested pause before offer completed.
-            if not session.active:
-                await self._set_session_active(session, False)
 
         except Exception as exc:
             self.log(f"[WS] Offer handling failed (cam-{session.label}): {exc}")
@@ -408,21 +436,43 @@ class CameraServer:
         await self._handler(websocket, "B")
 
     async def stats_loop(self):
+        last_sent = {"A": 0, "B": 0}
         while True:
             await asyncio.sleep(5.0)
             a_clients = len(self.sessions_a)
             b_clients = len(self.sessions_b)
             a_active = sum(1 for s in self.sessions_a.values() if s.active)
             b_active = sum(1 for s in self.sessions_b.values() if s.active)
+
+            # Sum frames_sent across all sessions per camera so we can see if
+            # the encoder is making progress at all.
+            a_total = sum(
+                (s.track.frames_sent if s.track else 0)
+                for s in self.sessions_a.values()
+            )
+            b_total = sum(
+                (s.track.frames_sent if s.track else 0)
+                for s in self.sessions_b.values()
+            )
+            a_fps = (a_total - last_sent["A"]) / 5.0
+            b_fps = (b_total - last_sent["B"]) / 5.0
+            last_sent["A"] = a_total
+            last_sent["B"] = b_total
+
             self.log(
-                f"[STAT] cam-A clients={a_clients} active={a_active} | "
-                f"cam-B clients={b_clients} active={b_active}"
+                f"[STAT] cam-A clients={a_clients} active={a_active} "
+                f"enc_fps≈{a_fps:.1f} | "
+                f"cam-B clients={b_clients} active={b_active} "
+                f"enc_fps≈{b_fps:.1f}"
             )
 
     async def start(self):
         self.log(f"[INIT] Camera A signaling -> ws://0.0.0.0:{self.port_a}")
         self.log(f"[INIT] Camera B signaling -> ws://0.0.0.0:{self.port_b}")
-        self.log(f"[INIT] WebRTC stream fps target={self.stream_fps}")
+        self.log(
+            f"[INIT] WebRTC encode={self.rtc_width}x{self.rtc_height} "
+            f"fps={self.stream_fps} (capture {self.width}x{self.height})"
+        )
         self.log(f"[INIT] ICE servers: {', '.join(self.rtc_ice_urls) if self.rtc_ice_urls else '(none)'}")
         self.log(
             "[INIT] Ignoring legacy JPEG args: "
@@ -446,8 +496,12 @@ if __name__ == "__main__":
                         help="Signaling port for camera A")
     parser.add_argument("--port-b", type=int, default=8002,
                         help="Signaling port for camera B")
-    parser.add_argument("--fps", type=int, default=24,
-                        help="Target WebRTC video send fps")
+    parser.add_argument("--fps", type=int, default=15,
+                        help="Target WebRTC video send fps (encoder pacing)")
+    parser.add_argument("--rtc-width", type=int, default=640,
+                        help="Encoded frame width (capture is downscaled to this before encode)")
+    parser.add_argument("--rtc-height", type=int, default=360,
+                        help="Encoded frame height (capture is downscaled to this before encode)")
     parser.add_argument("--capture-fps", type=int, default=30,
                         help="V4L2 capture frame rate")
     parser.add_argument("--quality", type=int, default=70,

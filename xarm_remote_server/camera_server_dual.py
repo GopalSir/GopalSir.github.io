@@ -1,56 +1,57 @@
 """
-Dual-camera WebSocket broadcaster with realtime frame handling.
+Dual-camera WebRTC server with WebSocket signaling.
 
-Optimizations vs. legacy:
-  - V4L2 buffer = 1 + dedicated reader threads (latest-frame-wins, no V4L2 backlog).
-  - Per-client backpressure: drop frames for clients whose send buffer is behind.
-  - Binary JPEG WebSocket frames by default (no base64+JSON wrapper, ~33% less bytes).
-  - Pause/resume protocol: server only encodes for cameras a client is viewing.
-  - JPEG encode runs in asyncio.to_thread so the event loop stays responsive.
-  - Default 720p @ q70 -> ~3-4x smaller frames vs. 1080p @ q85.
+This replaces MJPEG-over-WebSocket with native WebRTC video tracks:
+  - Better decode performance on Android (hardware codec pipeline).
+  - Preserves latest-frame-wins capture via dedicated reader threads.
+  - Keeps pause/resume semantics per camera stream.
 
-Wire protocol (server -> client):
-  - Default mode  : raw JPEG bytes per WebSocket message (binaryType='arraybuffer').
-  - --legacy-text : '{"type":"frame","data":"<base64>"}' for older clients.
+Signaling protocol (JSON over ws:// camera ports):
+  client -> server:
+    {"type":"offer","sdp":"..."}
+    {"type":"pause"}
+    {"type":"resume"}
+    {"type":"ping"}
 
-Wire protocol (client -> server):
-  - '{"type":"pause"}'  -> stop sending frames to this client (still encoded if any
-                          other client wants them; saved end-to-end CPU + bandwidth).
-  - '{"type":"resume"}' -> resume sending frames to this client.
-  - Default state on connect is 'resume' (active).
+  server -> client:
+    {"type":"ready","camera":"A"|"B"}
+    {"type":"answer","sdp":"..."}
+    {"type":"pong"}
+
+Notes:
+  - This server intentionally uses non-trickle ICE (offer/answer SDP only).
+  - For off-LAN reliability you will need TURN in the browser ICE config.
 """
-import asyncio
+
 import argparse
-import base64
+import asyncio
 import json
 import threading
 import time
+from dataclasses import dataclass
+from typing import Dict, Optional
 
 import cv2
+import numpy as np
 import websockets
 
-
-# ──────────────────────────────────────────────
-# Camera helpers
-# ──────────────────────────────────────────────
-
-def _jpeg_encode(frame, quality):
-    """Run on a worker thread via asyncio.to_thread."""
-    ok, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-    if not ok:
-        return None
-    return buf.tobytes()
+try:
+    from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+    from av import VideoFrame
+except Exception as exc:  # pragma: no cover (runtime dependency guard)
+    raise SystemExit(
+        "Missing WebRTC dependencies. Install on Pi with: pip install aiortc av"
+    ) from exc
 
 
 def open_camera(device, width=1280, height=720, fps=30):
-    """V4L2 + MJPG. Buffer size pinned to 1 so reader threads always see fresh frames."""
+    """Open V4L2 capture in MJPG mode with minimal driver buffering."""
     cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     cap.set(cv2.CAP_PROP_FPS, fps)
     try:
-        # Critical: without this V4L2 keeps a 4-frame queue and you read stale frames.
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     except Exception:
         pass
@@ -59,15 +60,10 @@ def open_camera(device, width=1280, height=720, fps=30):
     return cap
 
 
-def log_camera_resolution(log_fn, cap, label, device):
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    log_fn(f"[CAM] Camera {label} ({device}) driver reports: {w}x{h}")
-
-
 class FrameHolder:
-    """Thread-safe latest-frame container. Older frames are silently overwritten."""
-    __slots__ = ('lock', 'frame', 'ts')
+    """Thread-safe latest frame slot."""
+
+    __slots__ = ("lock", "frame", "ts")
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -85,56 +81,96 @@ class FrameHolder:
 
 
 def reader_loop(cap, holder, stop_event, label, log_fn):
-    """Continuously drain the V4L2 buffer and overwrite the latest frame."""
+    """Continuously drain camera frames so we always keep the freshest one."""
     log_fn(f"[CAM] Reader thread {label} started")
-    consecutive_failures = 0
+    misses = 0
     while not stop_event.is_set():
         ok, frame = cap.read()
         if ok:
             holder.set(frame)
-            consecutive_failures = 0
+            misses = 0
         else:
-            consecutive_failures += 1
-            if consecutive_failures % 100 == 1:
-                log_fn(f"[CAM] Reader {label} read failure (#{consecutive_failures})")
+            misses += 1
+            if misses % 100 == 1:
+                log_fn(f"[CAM] Reader {label} read failure (#{misses})")
             time.sleep(0.01)
     log_fn(f"[CAM] Reader thread {label} stopped")
 
 
-class ClientState:
-    """Per-connection state: WebSocket + active flag (pause/resume)."""
-    __slots__ = ('ws', 'active')
-
-    def __init__(self, ws):
-        self.ws = ws
-        self.active = True
+async def _await_if_needed(value):
+    if asyncio.iscoroutine(value):
+        await value
 
 
-# ──────────────────────────────────────────────
-# Server
-# ──────────────────────────────────────────────
+class LatestFrameVideoTrack(VideoStreamTrack):
+    """
+    WebRTC VideoStreamTrack backed by a latest-frame holder.
+
+    This track paces output at target_fps and emits the freshest capture frame.
+    """
+
+    def __init__(self, holder: FrameHolder, width: int, height: int, target_fps: int):
+        super().__init__()
+        self.holder = holder
+        self.width = max(1, int(width))
+        self.height = max(1, int(height))
+        self.target_fps = max(1, int(target_fps))
+        self.interval_s = 1.0 / float(self.target_fps)
+        self.next_deadline = time.perf_counter()
+        self.last_frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+
+    async def recv(self):
+        now = time.perf_counter()
+        sleep_for = self.next_deadline - now
+        if sleep_for > 0:
+            await asyncio.sleep(sleep_for)
+        self.next_deadline = max(
+            self.next_deadline + self.interval_s,
+            time.perf_counter(),
+        )
+
+        frame, _ = self.holder.snapshot()
+        if frame is not None:
+            self.last_frame = frame
+
+        video = VideoFrame.from_ndarray(self.last_frame, format="bgr24")
+        pts, time_base = await self.next_timestamp()
+        video.pts = pts
+        video.time_base = time_base
+        return video
+
+
+@dataclass
+class ClientSession:
+    ws: object
+    label: str
+    active: bool = True
+    pc: Optional[RTCPeerConnection] = None
+    sender: Optional[object] = None
+    track: Optional[LatestFrameVideoTrack] = None
+    ice_done: Optional[asyncio.Event] = None
+
 
 class CameraServer:
     def __init__(self, args):
         self.port_a = args.port_a
         self.port_b = args.port_b
-        self.delay = 1.0 / args.fps
-        self.quality = args.quality
-        self.binary = not args.legacy_text
-        self.max_buffer_bytes = args.max_buffer_bytes
-        self.send_timeout = args.send_timeout
+        self.capture_fps = args.capture_fps
+        self.stream_fps = args.fps
+        self.width = args.width
+        self.height = args.height
 
         self.log(
-            f"[INIT] Opening cameras at {args.width}x{args.height} MJPG "
-            f"(capture_fps={args.capture_fps}, broadcast_fps={args.fps})"
+            f"[INIT] Opening cameras at {self.width}x{self.height} "
+            f"(capture_fps={self.capture_fps}, stream_fps={self.stream_fps})"
         )
-        self.cap_a = open_camera(args.device_a, args.width, args.height, args.capture_fps)
-        self.cap_b = open_camera(args.device_b, args.width, args.height, args.capture_fps)
-        log_camera_resolution(self.log, self.cap_a, "A", args.device_a)
-        log_camera_resolution(self.log, self.cap_b, "B", args.device_b)
+
+        self.cap_a = open_camera(args.device_a, self.width, self.height, self.capture_fps)
+        self.cap_b = open_camera(args.device_b, self.width, self.height, self.capture_fps)
 
         self.holder_a = FrameHolder()
         self.holder_b = FrameHolder()
+
         self.stop_event = threading.Event()
         self.thread_a = threading.Thread(
             target=reader_loop,
@@ -151,217 +187,266 @@ class CameraServer:
         self.thread_a.start()
         self.thread_b.start()
 
-        self.clients_a: dict = {}  # ws -> ClientState
-        self.clients_b: dict = {}
-        self.last_ts_a = 0.0
-        self.last_ts_b = 0.0
+        self.sessions_a: Dict[object, ClientSession] = {}
+        self.sessions_b: Dict[object, ClientSession] = {}
 
-        # Lightweight stats for periodic logging.
-        self._sent_a = 0
-        self._sent_b = 0
-        self._dropped_a = 0
-        self._dropped_b = 0
-        self._stats_last_log = time.monotonic()
+        # Compatibility flags accepted from the old script; not used by WebRTC path.
+        self.ignored_quality = args.quality
+        self.ignored_legacy_text = args.legacy_text
+        self.ignored_max_buffer_bytes = args.max_buffer_bytes
+        self.ignored_send_timeout = args.send_timeout
 
     def log(self, msg):
         print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
-    async def encode(self, frame):
-        return await asyncio.to_thread(_jpeg_encode, frame, self.quality)
-
     @staticmethod
-    def _write_buffer_size(ws):
+    async def _send_json(ws, payload):
         try:
-            return ws.transport.get_write_buffer_size()
+            await ws.send(json.dumps(payload))
         except Exception:
-            return 0
+            pass
 
-    async def _send_to_client(self, state, payload, drop_counter_label):
-        """Send to a single client; drop the frame if the client is behind."""
-        ws = state.ws
-        if self._write_buffer_size(ws) > self.max_buffer_bytes:
-            if drop_counter_label == 'A':
-                self._dropped_a += 1
-            else:
-                self._dropped_b += 1
-            return False
+    def _holder_for_label(self, label):
+        return self.holder_a if label == "A" else self.holder_b
+
+    def _sessions_for_label(self, label):
+        return self.sessions_a if label == "A" else self.sessions_b
+
+    def _new_track(self, label):
+        holder = self._holder_for_label(label)
+        return LatestFrameVideoTrack(holder, self.width, self.height, self.stream_fps)
+
+    async def _wait_for_ice(self, session: ClientSession, timeout_s=1.5):
+        pc = session.pc
+        if not pc:
+            return
+        if pc.iceGatheringState == "complete":
+            return
+        if not session.ice_done:
+            return
         try:
-            await asyncio.wait_for(ws.send(payload), timeout=self.send_timeout)
-            return True
+            await asyncio.wait_for(session.ice_done.wait(), timeout=timeout_s)
         except asyncio.TimeoutError:
-            if drop_counter_label == 'A':
-                self._dropped_a += 1
-            else:
-                self._dropped_b += 1
-            return False
-        except websockets.ConnectionClosed:
-            return False
-        except Exception:
-            return False
+            self.log(f"[WS] ICE gather timeout (cam-{session.label}), sending answer anyway")
 
-    def _wrap_text(self, jpeg_bytes):
-        return json.dumps({
-            "type": "frame",
-            "data": base64.b64encode(jpeg_bytes).decode('utf-8'),
-        })
+    async def _close_peer(self, session: ClientSession, reason=""):
+        pc = session.pc
+        track = session.track
 
-    async def _broadcast_camera(self, holder, clients, label):
-        """Encode + send the latest frame to all *active* clients of one camera."""
-        active_states = [s for s in clients.values() if s.active]
-        if not active_states:
+        session.pc = None
+        session.sender = None
+        session.track = None
+        session.ice_done = None
+
+        if track:
+            try:
+                track.stop()
+            except Exception:
+                pass
+
+        if pc:
+            try:
+                await _await_if_needed(pc.close())
+            except Exception:
+                pass
+
+        if reason:
+            self.log(f"[WS] Closed peer (cam-{session.label}): {reason}")
+
+    async def _set_session_active(self, session: ClientSession, active: bool):
+        changed = session.active != active
+        session.active = active
+
+        if not session.pc or not session.sender:
             return
 
-        frame, ts = holder.snapshot()
-        if frame is None:
-            return
-
-        last_ts = self.last_ts_a if label == 'A' else self.last_ts_b
-        if ts <= last_ts:
-            return  # No new frame since last broadcast; skip.
-        if label == 'A':
-            self.last_ts_a = ts
+        if active:
+            if session.track is None:
+                session.track = self._new_track(session.label)
+            try:
+                await _await_if_needed(session.sender.replaceTrack(session.track))
+                if changed:
+                    self.log(f"[WS] Client resumed (cam-{session.label}): {session.ws.remote_address}")
+            except Exception as exc:
+                self.log(f"[WS] Resume failed (cam-{session.label}): {exc}")
         else:
-            self.last_ts_b = ts
+            try:
+                await _await_if_needed(session.sender.replaceTrack(None))
+                if session.track:
+                    try:
+                        session.track.stop()
+                    except Exception:
+                        pass
+                    session.track = None
+                if changed:
+                    self.log(f"[WS] Client paused (cam-{session.label}): {session.ws.remote_address}")
+            except Exception as exc:
+                self.log(f"[WS] Pause failed (cam-{session.label}): {exc}")
 
-        jpeg_bytes = await self.encode(frame)
-        if jpeg_bytes is None:
+    async def _handle_offer(self, session: ClientSession, sdp: str):
+        if not sdp:
+            await self._send_json(session.ws, {"type": "error", "message": "Missing offer SDP"})
             return
 
-        payload = jpeg_bytes if self.binary else self._wrap_text(jpeg_bytes)
-        results = await asyncio.gather(
-            *[self._send_to_client(s, payload, label) for s in active_states],
-            return_exceptions=True,
-        )
-        sent_count = sum(1 for r in results if r is True)
-        if label == 'A':
-            self._sent_a += sent_count
-        else:
-            self._sent_b += sent_count
+        await self._close_peer(session, reason="renegotiate")
 
-    def _maybe_log_stats(self):
-        now = time.monotonic()
-        if now - self._stats_last_log < 5.0:
-            return
-        elapsed = now - self._stats_last_log
-        self._stats_last_log = now
-        a_active = sum(1 for s in self.clients_a.values() if s.active)
-        b_active = sum(1 for s in self.clients_b.values() if s.active)
-        a_fps = self._sent_a / max(1, len(self.clients_a)) / elapsed if self.clients_a else 0
-        b_fps = self._sent_b / max(1, len(self.clients_b)) / elapsed if self.clients_b else 0
-        self.log(
-            f"[STAT] A: clients={len(self.clients_a)} active={a_active} "
-            f"sent_fps≈{a_fps:.1f} dropped={self._dropped_a} | "
-            f"B: clients={len(self.clients_b)} active={b_active} "
-            f"sent_fps≈{b_fps:.1f} dropped={self._dropped_b}"
-        )
-        self._sent_a = self._sent_b = 0
-        self._dropped_a = self._dropped_b = 0
+        pc = RTCPeerConnection()
+        session.pc = pc
+        session.ice_done = asyncio.Event()
 
-    async def frame_broadcaster(self):
-        # Let reader threads fill at least one frame before we start.
-        await asyncio.sleep(0.5)
-        self.log(
-            f"[INIT] Broadcaster started "
-            f"(binary={self.binary}, max_buffer_bytes={self.max_buffer_bytes}, "
-            f"send_timeout={self.send_timeout}s)"
-        )
-        while True:
-            t0 = time.time()
-            await asyncio.gather(
-                self._broadcast_camera(self.holder_a, self.clients_a, 'A'),
-                self._broadcast_camera(self.holder_b, self.clients_b, 'B'),
-                return_exceptions=True,
-            )
-            self._maybe_log_stats()
-            elapsed = time.time() - t0
-            await asyncio.sleep(max(0, self.delay - elapsed))
+        @pc.on("icegatheringstatechange")
+        async def on_ice_gathering_state_change():
+            # Ignore stale callbacks after session renegotiation/cleanup.
+            if session.pc is not pc:
+                return
+            if pc.iceGatheringState == "complete" and session.ice_done:
+                session.ice_done.set()
 
-    async def _handle_client_message(self, state, message, label):
-        """Process pause/resume commands from a client."""
-        if not isinstance(message, str):
-            return
+        @pc.on("connectionstatechange")
+        async def on_connectionstatechange():
+            if session.pc is not pc:
+                return
+            state = pc.connectionState
+            self.log(f"[WS] Peer state (cam-{session.label}): {state}")
+            if state in ("failed", "closed"):
+                await self._close_peer(session, reason=f"state={state}")
+
         try:
-            cmd = json.loads(message)
+            await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+            session.track = self._new_track(session.label)
+            session.sender = pc.addTrack(session.track)
+
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+            await self._wait_for_ice(session)
+
+            await self._send_json(
+                session.ws,
+                {
+                    "type": "answer",
+                    "sdp": pc.localDescription.sdp if pc.localDescription else answer.sdp,
+                },
+            )
+
+            # Respect paused state if client requested pause before offer completed.
+            if not session.active:
+                await self._set_session_active(session, False)
+
+        except Exception as exc:
+            self.log(f"[WS] Offer handling failed (cam-{session.label}): {exc}")
+            await self._send_json(session.ws, {"type": "error", "message": str(exc)})
+            await self._close_peer(session, reason="offer-failed")
+
+    async def _handle_client_message(self, session: ClientSession, message: str):
+        try:
+            payload = json.loads(message)
         except json.JSONDecodeError:
             return
-        t = cmd.get('type')
-        if t == 'pause' and state.active:
-            state.active = False
-            self.log(f"[WS] Client paused (cam-{label}): {state.ws.remote_address}")
-        elif t == 'resume' and not state.active:
-            state.active = True
-            self.log(f"[WS] Client resumed (cam-{label}): {state.ws.remote_address}")
+
+        msg_type = payload.get("type")
+
+        if msg_type == "offer":
+            await self._handle_offer(session, payload.get("sdp", ""))
+        elif msg_type == "pause":
+            await self._set_session_active(session, False)
+        elif msg_type == "resume":
+            await self._set_session_active(session, True)
+        elif msg_type == "ping":
+            await self._send_json(session.ws, {"type": "pong"})
+        elif msg_type == "candidate":
+            # Non-trickle mode: candidates are bundled in SDP offer/answer.
+            pass
+        else:
+            self.log(f"[WS] Unknown message type (cam-{session.label}): {msg_type}")
 
     async def _handler(self, websocket, label):
-        clients = self.clients_a if label == 'A' else self.clients_b
-        state = ClientState(websocket)
-        clients[websocket] = state
+        sessions = self._sessions_for_label(label)
+        session = ClientSession(ws=websocket, label=label)
+        sessions[websocket] = session
+
         self.log(f"[WS] Client connected (cam-{label}): {websocket.remote_address}")
+        await self._send_json(websocket, {"type": "ready", "camera": label})
+
         try:
             async for message in websocket:
-                await self._handle_client_message(state, message, label)
+                if isinstance(message, str):
+                    await self._handle_client_message(session, message)
         except websockets.ConnectionClosed:
             pass
         finally:
-            clients.pop(websocket, None)
+            sessions.pop(websocket, None)
+            await self._close_peer(session, reason="client-disconnect")
             self.log(f"[WS] Client disconnected (cam-{label})")
 
     async def handler_a(self, websocket):
-        await self._handler(websocket, 'A')
+        await self._handler(websocket, "A")
 
     async def handler_b(self, websocket):
-        await self._handler(websocket, 'B')
+        await self._handler(websocket, "B")
+
+    async def stats_loop(self):
+        while True:
+            await asyncio.sleep(5.0)
+            a_clients = len(self.sessions_a)
+            b_clients = len(self.sessions_b)
+            a_active = sum(1 for s in self.sessions_a.values() if s.active)
+            b_active = sum(1 for s in self.sessions_b.values() if s.active)
+            self.log(
+                f"[STAT] cam-A clients={a_clients} active={a_active} | "
+                f"cam-B clients={b_clients} active={b_active}"
+            )
 
     async def start(self):
-        self.log(f"[INIT] Camera A  ->  ws://0.0.0.0:{self.port_a}")
-        self.log(f"[INIT] Camera B  ->  ws://0.0.0.0:{self.port_b}")
-        self.log(f"[INIT] Stream FPS={1/self.delay:.0f}  JPEG quality={self.quality}")
+        self.log(f"[INIT] Camera A signaling -> ws://0.0.0.0:{self.port_a}")
+        self.log(f"[INIT] Camera B signaling -> ws://0.0.0.0:{self.port_b}")
+        self.log(f"[INIT] WebRTC stream fps target={self.stream_fps}")
+        self.log(
+            "[INIT] Ignoring legacy JPEG args: "
+            f"quality={self.ignored_quality}, legacy_text={self.ignored_legacy_text}, "
+            f"max_buffer_bytes={self.ignored_max_buffer_bytes}, send_timeout={self.ignored_send_timeout}"
+        )
 
         async with (
             websockets.serve(self.handler_a, "0.0.0.0", self.port_a),
             websockets.serve(self.handler_b, "0.0.0.0", self.port_b),
         ):
-            await self.frame_broadcaster()
+            await asyncio.gather(self.stats_loop(), asyncio.Future())
 
-
-# ──────────────────────────────────────────────
-# CLI
-# ──────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Dual-camera WebSocket server (latest-frame-wins, binary JPEG).",
+        description="Dual-camera WebRTC server with WebSocket signaling.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--port-a", type=int, default=8001,
-                        help="Port for camera A (existing tunnel ingress)")
+                        help="Signaling port for camera A")
     parser.add_argument("--port-b", type=int, default=8002,
-                        help="Port for camera B (second tunnel ingress)")
-    parser.add_argument("--fps", type=int, default=20,
-                        help="WebSocket broadcast frame rate")
+                        help="Signaling port for camera B")
+    parser.add_argument("--fps", type=int, default=24,
+                        help="Target WebRTC video send fps")
     parser.add_argument("--capture-fps", type=int, default=30,
-                        help="V4L2 capture frame rate (hardware MJPG mode)")
+                        help="V4L2 capture frame rate")
     parser.add_argument("--quality", type=int, default=70,
-                        help="Outbound JPEG quality (1-100)")
+                        help="Legacy JPEG arg (ignored, kept for script compatibility)")
     parser.add_argument("--width", type=int, default=1280,
-                        help="Capture width for both cameras (MJPG)")
+                        help="Capture width for both cameras")
     parser.add_argument("--height", type=int, default=720,
-                        help="Capture height for both cameras (MJPG)")
+                        help="Capture height for both cameras")
     parser.add_argument("--device-a", type=str, default="/dev/video0",
                         help="Device for camera A")
     parser.add_argument("--device-b", type=str, default="/dev/video3",
                         help="Device for camera B")
     parser.add_argument("--legacy-text", action="store_true",
-                        help="Send base64+JSON text frames (older clients only)")
+                        help="Legacy JPEG flag (ignored)")
     parser.add_argument("--max-buffer-bytes", type=int, default=1_000_000,
-                        help="Drop frame if a client's TCP send buffer exceeds this")
+                        help="Legacy JPEG flag (ignored)")
     parser.add_argument("--send-timeout", type=float, default=0.1,
-                        help="Per-client send timeout in seconds (drop if exceeded)")
+                        help="Legacy JPEG flag (ignored)")
     args = parser.parse_args()
 
     for attr in ("device_a", "device_b"):
         val = getattr(args, attr)
-        if val.lstrip('-').isdigit():
+        if isinstance(val, str) and val.lstrip("-").isdigit():
             setattr(args, attr, int(val))
 
     server = CameraServer(args)
@@ -370,7 +455,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n[EXIT] Releasing cameras ...")
         server.stop_event.set()
-        # Give reader threads a moment to exit cleanly.
         time.sleep(0.05)
         server.cap_a.release()
         server.cap_b.release()

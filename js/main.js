@@ -6,6 +6,7 @@ import {
   APP_DEBUG_VERSION,
   CAMERA_WS_URL,
   CAMERA2_WS_URL,
+  CAMERA_ICE_SERVERS,
   HAND_MODEL_PATH,
   MEDIAPIPE_WASM_BASE,
   cameraIndexForMode,
@@ -82,8 +83,8 @@ const fpsStats = {
 
 const controller = createRobotController();
 const robot = createRobotConnection();
-const cam1 = createCameraReceiver(CAMERA_WS_URL, 'cam1');
-const cam2 = createCameraReceiver(CAMERA2_WS_URL, 'cam2');
+const cam1 = createCameraReceiver(CAMERA_WS_URL, 'cam1', CAMERA_ICE_SERVERS);
+const cam2 = createCameraReceiver(CAMERA2_WS_URL, 'cam2', CAMERA_ICE_SERVERS);
 const gestures = createGestureTracker();
 const compositor = createCompositor(dom.canvas);
 const recorder = createEpisodeRecorder(dom.canvas);

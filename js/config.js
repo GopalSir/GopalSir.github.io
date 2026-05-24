@@ -1,9 +1,20 @@
 /** Network endpoints and reference display geometry (matches Python client). */
-export const APP_DEBUG_VERSION = 'perf-v5b';
+export const APP_DEBUG_VERSION = 'perf-v6-webrtc';
 
 export const TUNNEL_URL = 'wss://robot.anantlibrary.in';
 export const CAMERA_WS_URL = 'wss://camera.anantlibrary.in';
 export const CAMERA2_WS_URL = 'wss://camera2.anantlibrary.in';
+
+/**
+ * ICE servers for WebRTC camera streams.
+ * STUN helps for local/public discovery; for reliable remote access across NAT
+ * you should append your TURN server credentials here.
+ */
+export const CAMERA_ICE_SERVERS = [
+  {
+    urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'],
+  },
+];
 
 export const REF_WIDTH = 1920;
 export const REF_HEIGHT = 1080;

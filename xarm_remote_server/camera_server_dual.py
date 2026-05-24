@@ -36,7 +36,13 @@ import numpy as np
 import websockets
 
 try:
-    from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+    from aiortc import (
+        RTCPeerConnection,
+        RTCSessionDescription,
+        VideoStreamTrack,
+        RTCConfiguration,
+        RTCIceServer,
+    )
     from av import VideoFrame
 except Exception as exc:  # pragma: no cover (runtime dependency guard)
     raise SystemExit(
@@ -160,6 +166,23 @@ class CameraServer:
         self.width = args.width
         self.height = args.height
 
+        ice_servers = []
+        for url in args.stun_url:
+            if url:
+                ice_servers.append(RTCIceServer(urls=url))
+        if args.turn_url:
+            ice_servers.append(
+                RTCIceServer(
+                    urls=args.turn_url,
+                    username=args.turn_username or "",
+                    credential=args.turn_password or "",
+                )
+            )
+        self.rtc_configuration = RTCConfiguration(iceServers=ice_servers)
+        self.rtc_ice_urls = [url for url in args.stun_url if url]
+        if args.turn_url:
+            self.rtc_ice_urls.append(args.turn_url)
+
         self.log(
             f"[INIT] Opening cameras at {self.width}x{self.height} "
             f"(capture_fps={self.capture_fps}, stream_fps={self.stream_fps})"
@@ -216,7 +239,7 @@ class CameraServer:
         holder = self._holder_for_label(label)
         return LatestFrameVideoTrack(holder, self.width, self.height, self.stream_fps)
 
-    async def _wait_for_ice(self, session: ClientSession, timeout_s=1.5):
+    async def _wait_for_ice(self, session: ClientSession, timeout_s=5.0):
         pc = session.pc
         if not pc:
             return
@@ -290,7 +313,7 @@ class CameraServer:
 
         await self._close_peer(session, reason="renegotiate")
 
-        pc = RTCPeerConnection()
+        pc = RTCPeerConnection(self.rtc_configuration)
         session.pc = pc
         session.ice_done = asyncio.Event()
 
@@ -400,6 +423,7 @@ class CameraServer:
         self.log(f"[INIT] Camera A signaling -> ws://0.0.0.0:{self.port_a}")
         self.log(f"[INIT] Camera B signaling -> ws://0.0.0.0:{self.port_b}")
         self.log(f"[INIT] WebRTC stream fps target={self.stream_fps}")
+        self.log(f"[INIT] ICE servers: {', '.join(self.rtc_ice_urls) if self.rtc_ice_urls else '(none)'}")
         self.log(
             "[INIT] Ignoring legacy JPEG args: "
             f"quality={self.ignored_quality}, legacy_text={self.ignored_legacy_text}, "
@@ -442,6 +466,30 @@ if __name__ == "__main__":
                         help="Legacy JPEG flag (ignored)")
     parser.add_argument("--send-timeout", type=float, default=0.1,
                         help="Legacy JPEG flag (ignored)")
+    parser.add_argument(
+        "--stun-url",
+        action="append",
+        default=["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
+        help="ICE STUN server URL (repeatable)",
+    )
+    parser.add_argument(
+        "--turn-url",
+        type=str,
+        default="",
+        help="ICE TURN URL (e.g. turn:turn.example.com:3478?transport=udp)",
+    )
+    parser.add_argument(
+        "--turn-username",
+        type=str,
+        default="",
+        help="TURN username",
+    )
+    parser.add_argument(
+        "--turn-password",
+        type=str,
+        default="",
+        help="TURN credential/password",
+    )
     args = parser.parse_args()
 
     for attr in ("device_a", "device_b"):

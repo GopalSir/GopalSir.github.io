@@ -60,9 +60,15 @@ export function createCameraReceiver(url, label = 'cam') {
   async function decodeFrameImageDecoder(bytes) {
     const decoder = new ImageDecoder({ data: bytes, type: 'image/jpeg' });
     try {
-      const { image } = await decoder.decode();
-      // image is a VideoFrame — supports ctx.drawImage() and .close()
-      return image;
+      const { image: frame } = await decoder.decode();
+      // Convert VideoFrame → ImageBitmap so compositor can use .width/.height normally.
+      // createImageBitmap(VideoFrame) is a GPU texture copy (~1ms) since the JPEG is
+      // already decoded; the hardware speedup from ImageDecoder is still realised.
+      try {
+        return await createImageBitmap(frame);
+      } finally {
+        frame.close();
+      }
     } finally {
       decoder.close();
     }

@@ -16,14 +16,35 @@ export function createEpisodeRecorder(canvas) {
     URL.revokeObjectURL(a.href);
   }
 
+  function pickMimeType() {
+    // Prefer hardware-friendly codecs first; vp9 is high quality but CPU-heavy
+    // on Android tablets and competes with the live render loop.
+    const candidates = [
+      'video/webm;codecs=h264',
+      'video/webm;codecs=vp8',
+      'video/webm;codecs=vp9',
+      'video/webm',
+    ];
+    for (const c of candidates) {
+      if (
+        typeof MediaRecorder !== 'undefined' &&
+        MediaRecorder.isTypeSupported &&
+        MediaRecorder.isTypeSupported(c)
+      ) {
+        return c;
+      }
+    }
+    return '';
+  }
+
   function start() {
     if (recording) return false;
     chunks = [];
     const stream = canvas.captureStream(30);
-    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
-      ? 'video/webm;codecs=vp9'
-      : 'video/webm';
-    mediaRecorder = new MediaRecorder(stream, { mimeType });
+    const mimeType = pickMimeType();
+    mediaRecorder = mimeType
+      ? new MediaRecorder(stream, { mimeType })
+      : new MediaRecorder(stream);
     mediaRecorder.ondataavailable = (e) => {
       if (e.data.size > 0) chunks.push(e.data);
     };

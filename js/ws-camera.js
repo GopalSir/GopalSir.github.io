@@ -19,10 +19,19 @@ export function createCameraReceiver(url, label = 'cam') {
     for (const fn of listeners) fn({ label, connected, frameCount });
   }
 
+  function base64ToUint8Array(b64) {
+    const binStr = atob(b64);
+    const len = binStr.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binStr.charCodeAt(i);
+    }
+    return bytes;
+  }
+
   async function decodeFrame(b64) {
-    const blob = await fetch(`data:image/jpeg;base64,${b64}`).then((r) =>
-      r.blob()
-    );
+    const bytes = base64ToUint8Array(b64);
+    const blob = new Blob([bytes], { type: 'image/jpeg' });
     const newBitmap = await createImageBitmap(blob);
     const oldBitmap = latestBitmap;
     latestBitmap = newBitmap;
@@ -74,14 +83,15 @@ export function createCameraReceiver(url, label = 'cam') {
     };
 
     ws.onmessage = (event) => {
+      // When inactive, drop messages without parsing — saves JSON.parse on
+      // ~80-150 KB payloads for the camera the user isn't currently viewing.
+      if (!active) return;
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'frame' && data.data) {
           // Keep only newest frame; older ones are dropped intentionally.
           pendingFrameB64 = data.data;
-          if (active) {
-            void drainLatestFrame();
-          }
+          void drainLatestFrame();
         }
       } catch (e) {
         console.error(`[${label}] frame decode:`, e);

@@ -10,6 +10,7 @@ import {
 } from './config.js';
 
 const INIT_TIMEOUT_MS = 45000;
+const DETECT_MAX_WIDTH = 640;
 
 function withTimeout(promise, ms, label) {
   return Promise.race([
@@ -115,8 +116,14 @@ export function createGestureTracker() {
     if (!ready || !landmarker || videoEl.readyState < 2) {
       return null;
     }
-    const w = videoEl.videoWidth || REF_WIDTH;
-    const h = videoEl.videoHeight || REF_HEIGHT;
+    const vw = videoEl.videoWidth || REF_WIDTH;
+    const vh = videoEl.videoHeight || REF_HEIGHT;
+    // HandLandmarker resizes inputs internally to ~192x192 for palm detection.
+    // Feeding it a downscaled frame avoids per-frame full-HD blits without
+    // hurting accuracy in practice.
+    const scale = Math.min(1, DETECT_MAX_WIDTH / vw);
+    const w = Math.max(1, Math.round(vw * scale));
+    const h = Math.max(1, Math.round(vh * scale));
     if (detectCanvas.width !== w) detectCanvas.width = w;
     if (detectCanvas.height !== h) detectCanvas.height = h;
 

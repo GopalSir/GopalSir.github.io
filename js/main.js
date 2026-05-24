@@ -62,13 +62,22 @@ let lastModeLogged = null;
 let lastCameraLogged = null;
 let lastCam1FrameLogged = 0;
 let lastCam2FrameLogged = 0;
+let detectFrameCounter = 0;
+let lastDetectResults = null;
+let detectionRunCount = 0;
+// Skip every other rAF for hand detection; on a 60Hz tablet this lands at
+// ~30 detections/sec which is plenty for gesture control while halving
+// MediaPipe CPU/GPU cost.
+const DETECT_FRAME_SKIP = 1;
 const fpsStats = {
   lastTsMs: 0,
   lastCam1Frames: 0,
   lastCam2Frames: 0,
+  lastDetections: 0,
   renderAvg: 0,
   cam1Avg: 0,
   cam2Avg: 0,
+  detectAvg: 0,
 };
 
 const controller = createRobotController();
@@ -94,6 +103,7 @@ function updateFpsStats(nowMs) {
     fpsStats.lastTsMs = nowMs;
     fpsStats.lastCam1Frames = cam1.frameCount;
     fpsStats.lastCam2Frames = cam2.frameCount;
+    fpsStats.lastDetections = detectionRunCount;
     return;
   }
 
@@ -102,9 +112,11 @@ function updateFpsStats(nowMs) {
 
   const cam1Delta = cam1.frameCount - fpsStats.lastCam1Frames;
   const cam2Delta = cam2.frameCount - fpsStats.lastCam2Frames;
+  const detectDelta = detectionRunCount - fpsStats.lastDetections;
   const renderInst = 1000 / dtMs;
   const cam1Inst = (cam1Delta * 1000) / dtMs;
   const cam2Inst = (cam2Delta * 1000) / dtMs;
+  const detectInst = (detectDelta * 1000) / dtMs;
   const alpha = 0.2;
 
   fpsStats.renderAvg =
@@ -119,10 +131,15 @@ function updateFpsStats(nowMs) {
     fpsStats.cam2Avg === 0
       ? cam2Inst
       : fpsStats.cam2Avg * (1 - alpha) + cam2Inst * alpha;
+  fpsStats.detectAvg =
+    fpsStats.detectAvg === 0
+      ? detectInst
+      : fpsStats.detectAvg * (1 - alpha) + detectInst * alpha;
 
   fpsStats.lastTsMs = nowMs;
   fpsStats.lastCam1Frames = cam1.frameCount;
   fpsStats.lastCam2Frames = cam2.frameCount;
+  fpsStats.lastDetections = detectionRunCount;
 }
 
 function bootDebugSnapshot() {
@@ -156,7 +173,7 @@ function updateDebugPanel({ tsMs, motion, hudState, selectedCamera }) {
     `camera=${selectedCamera} clutch=${hudState.clutchActive ? 'LOCKED' : 'ACTIVE'}`,
     `neutral=${formatPt(hudState.neutralCenterPx)} leftWrist=${formatPt(hudState.leftWristPx)}`,
     `switchProb=${motion.switchProb.toFixed(2)} vGain=${motion.vGain.toFixed(2)} uDist=${motion.uDist.toFixed(2)}`,
-    `fps(render/c1/c2)=${fpsStats.renderAvg.toFixed(1)}/${fpsStats.cam1Avg.toFixed(1)}/${fpsStats.cam2Avg.toFixed(1)}`,
+    `fps(render/c1/c2/det)=${fpsStats.renderAvg.toFixed(1)}/${fpsStats.cam1Avg.toFixed(1)}/${fpsStats.cam2Avg.toFixed(1)}/${fpsStats.detectAvg.toFixed(1)}`,
     `camFrames=${cam1.frameCount}/${cam2.frameCount} camConn=${cam1.connected}/${cam2.connected} camActive=${cam1.active}/${cam2.active}`,
   ].join('\n');
 }
@@ -289,10 +306,24 @@ function gripperStopIfDue(nowS) {
 function loop() {
   if (stopFlag) return;
 
-  compositor.resizeToContainer(dom.root);
+  // resizeToContainer is driven by ResizeObserver / window 'resize' events
+  // (see bottom of file). Calling it here every frame would force a layout
+  // read on every rAF tick, which is expensive on tablets.
   const tsMs = Date.now();
   updateFpsStats(performance.now());
-  const results = gesturesReady ? gestures.detectForVideo(tsMs) : null;
+
+  let results = null;
+  if (gesturesReady) {
+    if (detectFrameCounter <= 0) {
+      results = gestures.detectForVideo(tsMs);
+      detectionRunCount++;
+      lastDetectResults = results;
+      detectFrameCounter = DETECT_FRAME_SKIP;
+    } else {
+      detectFrameCounter--;
+      results = lastDetectResults;
+    }
+  }
   const motion = controller.processHandResults(results, tsMs);
 
   const nowS = performance.now() / 1000;

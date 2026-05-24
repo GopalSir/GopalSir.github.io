@@ -8,9 +8,11 @@ import { drawHud } from './hud.js';
 export function createCompositor(canvas) {
   const ctx = canvas.getContext('2d');
 
+  const MAX_DPR = 1.25;
+
   function resizeToContainer(container) {
     const rect = container.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
     const w = Math.max(1, Math.floor(rect.width * dpr));
     const h = Math.max(1, Math.floor(rect.height * dpr));
     if (canvas.width !== w || canvas.height !== h) {

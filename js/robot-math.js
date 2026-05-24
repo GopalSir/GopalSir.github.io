@@ -64,7 +64,7 @@ export function velocityForModeMmS(mode, dx, dy) {
     vy = -MAX_LINEAR_SPEED_MM_S * gain * ux;
     vz = -MAX_LINEAR_SPEED_MM_S * gain * uy;
   } else if (mode === 'X Axis') {
-    vx = MAX_LINEAR_SPEED_MM_S * gain * uy;
+    vx = MAX_LINEAR_SPEED_MM_S * gain * ux;
   } else if (mode === 'Yaw/Pitch') {
     wz = MAX_ANGULAR_SPEED_RAD_S * gain * ux;
     wy = -MAX_ANGULAR_SPEED_RAD_S * gain * uy;

@@ -11,7 +11,22 @@
  *
  * Receiver only decodes the latest pending frame; older frames are dropped to
  * avoid building up end-to-end latency on tablets.
+ *
+ * Decode path (fastest first):
+ *   1. ImageDecoder  — hardware-accelerated JPEG decode (Chrome/Edge 94+, Android).
+ *      Returns a VideoFrame; compatible with ctx.drawImage() and .close().
+ *   2. createImageBitmap — software fallback for older browsers.
  */
+
+// Probe once at module load whether ImageDecoder + JPEG are available.
+// isTypeSupported is sync in the spec but some environments make it async;
+// we resolve it before the first frame arrives.
+let _imageDecoderSupported = false;
+if (typeof ImageDecoder !== 'undefined' && typeof ImageDecoder.isTypeSupported === 'function') {
+  Promise.resolve(ImageDecoder.isTypeSupported('image/jpeg'))
+    .then((ok) => { _imageDecoderSupported = !!ok; })
+    .catch(() => { _imageDecoderSupported = false; });
+}
 
 export function createCameraReceiver(url, label = 'cam') {
   let ws = null;
@@ -42,17 +57,40 @@ export function createCameraReceiver(url, label = 'cam') {
     return bytes;
   }
 
+  async function decodeFrameImageDecoder(bytes) {
+    const decoder = new ImageDecoder({ data: bytes, type: 'image/jpeg' });
+    try {
+      const { image } = await decoder.decode();
+      // image is a VideoFrame — supports ctx.drawImage() and .close()
+      return image;
+    } finally {
+      decoder.close();
+    }
+  }
+
   async function decodeFrame(input) {
-    let blob;
+    let bytes;
     if (input instanceof ArrayBuffer) {
-      blob = new Blob([input], { type: 'image/jpeg' });
+      bytes = input;
     } else if (typeof input === 'string') {
-      const bytes = base64ToUint8Array(input);
-      blob = new Blob([bytes], { type: 'image/jpeg' });
+      bytes = base64ToUint8Array(input).buffer;
     } else {
       return;
     }
-    const newBitmap = await createImageBitmap(blob);
+
+    let newBitmap;
+    if (_imageDecoderSupported) {
+      try {
+        newBitmap = await decodeFrameImageDecoder(bytes);
+      } catch (e) {
+        // ImageDecoder failed (corrupted frame, etc.) — fall through to createImageBitmap.
+        newBitmap = null;
+      }
+    }
+    if (!newBitmap) {
+      newBitmap = await createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }));
+    }
+
     const oldBitmap = latestBitmap;
     latestBitmap = newBitmap;
     if (oldBitmap) {

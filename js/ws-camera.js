@@ -1,5 +1,16 @@
 /**
- * Dual WebSocket camera receivers (base64 JPEG frames).
+ * Dual WebSocket camera receivers.
+ *
+ * Wire protocol (server -> client):
+ *   - Binary ArrayBuffer message  : raw JPEG bytes (preferred, default).
+ *   - Text JSON message           : '{"type":"frame","data":"<base64>"}' (legacy).
+ *
+ * Wire protocol (client -> server):
+ *   - '{"type":"pause"}'  -> ask server to stop sending until we resume.
+ *   - '{"type":"resume"}' -> ask server to resume sending.
+ *
+ * Receiver only decodes the latest pending frame; older frames are dropped to
+ * avoid building up end-to-end latency on tablets.
  */
 
 export function createCameraReceiver(url, label = 'cam') {
@@ -10,8 +21,10 @@ export function createCameraReceiver(url, label = 'cam') {
   let connected = false;
   let frameCount = 0;
   let active = true;
+  let lastSentActive = null; // last pause/resume value the server was told
   let decoding = false;
-  let pendingFrameB64 = null;
+  // pendingFrame is an ArrayBuffer (binary) or string (legacy base64). null = none.
+  let pendingFrame = null;
 
   const listeners = new Set();
 
@@ -29,9 +42,16 @@ export function createCameraReceiver(url, label = 'cam') {
     return bytes;
   }
 
-  async function decodeFrame(b64) {
-    const bytes = base64ToUint8Array(b64);
-    const blob = new Blob([bytes], { type: 'image/jpeg' });
+  async function decodeFrame(input) {
+    let blob;
+    if (input instanceof ArrayBuffer) {
+      blob = new Blob([input], { type: 'image/jpeg' });
+    } else if (typeof input === 'string') {
+      const bytes = base64ToUint8Array(input);
+      blob = new Blob([bytes], { type: 'image/jpeg' });
+    } else {
+      return;
+    }
     const newBitmap = await createImageBitmap(blob);
     const oldBitmap = latestBitmap;
     latestBitmap = newBitmap;
@@ -50,16 +70,27 @@ export function createCameraReceiver(url, label = 'cam') {
     if (decoding || !running || !active) return;
     decoding = true;
     try {
-      while (running && active && pendingFrameB64) {
-        const b64 = pendingFrameB64;
-        pendingFrameB64 = null;
-        await decodeFrame(b64);
+      while (running && active && pendingFrame !== null) {
+        const input = pendingFrame;
+        pendingFrame = null;
+        await decodeFrame(input);
       }
     } finally {
       decoding = false;
-      if (running && active && pendingFrameB64) {
+      if (running && active && pendingFrame !== null) {
         void drainLatestFrame();
       }
+    }
+  }
+
+  function syncActiveStateToServer() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (lastSentActive === active) return;
+    try {
+      ws.send(JSON.stringify({ type: active ? 'resume' : 'pause' }));
+      lastSentActive = active;
+    } catch (_) {
+      /* ignore: will retry on next transition */
     }
   }
 
@@ -73,28 +104,42 @@ export function createCameraReceiver(url, label = 'cam') {
       }
     }
     connected = false;
+    lastSentActive = null;
     notify();
 
     ws = new WebSocket(url);
+    // Critical: opt into binary frames as ArrayBuffer.
+    ws.binaryType = 'arraybuffer';
 
     ws.onopen = () => {
       connected = true;
       notify();
+      // Tell the server our current pause/resume state so it doesn't waste
+      // CPU encoding for a camera we aren't viewing.
+      syncActiveStateToServer();
     };
 
     ws.onmessage = (event) => {
-      // When inactive, drop messages without parsing — saves JSON.parse on
-      // ~80-150 KB payloads for the camera the user isn't currently viewing.
+      // When inactive, drop messages without parsing. The server will also
+      // stop sending once it processes our 'pause', but messages can still
+      // arrive in flight.
       if (!active) return;
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'frame' && data.data) {
-          // Keep only newest frame; older ones are dropped intentionally.
-          pendingFrameB64 = data.data;
-          void drainLatestFrame();
+      const data = event.data;
+      if (data instanceof ArrayBuffer) {
+        // Newest frame wins; older pending frames are intentionally dropped.
+        pendingFrame = data;
+        void drainLatestFrame();
+      } else if (typeof data === 'string') {
+        // Legacy base64+JSON path (--legacy-text on the server).
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.type === 'frame' && parsed.data) {
+            pendingFrame = parsed.data;
+            void drainLatestFrame();
+          }
+        } catch (e) {
+          console.error(`[${label}] frame decode:`, e);
         }
-      } catch (e) {
-        console.error(`[${label}] frame decode:`, e);
       }
     };
 
@@ -105,6 +150,7 @@ export function createCameraReceiver(url, label = 'cam') {
 
     ws.onclose = () => {
       connected = false;
+      lastSentActive = null;
       notify();
       if (running) {
         reconnectTimer = setTimeout(connect, 2000);
@@ -129,8 +175,12 @@ export function createCameraReceiver(url, label = 'cam') {
       return () => listeners.delete(fn);
     },
     setActive(nextActive) {
-      active = !!nextActive;
-      if (active && pendingFrameB64) {
+      const newActive = !!nextActive;
+      if (newActive === active) return;
+      active = newActive;
+      // Tell the server immediately so it can stop encoding for us.
+      syncActiveStateToServer();
+      if (active && pendingFrame !== null) {
         void drainLatestFrame();
       }
     },
@@ -139,7 +189,7 @@ export function createCameraReceiver(url, label = 'cam') {
     },
     stop() {
       running = false;
-      pendingFrameB64 = null;
+      pendingFrame = null;
       clearTimeout(reconnectTimer);
       if (ws) {
         try {

@@ -1,5 +1,5 @@
 /** Network endpoints and reference display geometry (matches Python client). */
-export const APP_DEBUG_VERSION = 'debug-v1';
+export const APP_DEBUG_VERSION = 'debug-v2';
 
 export const TUNNEL_URL = 'wss://robot.anantlibrary.in';
 export const CAMERA_WS_URL = 'wss://camera.anantlibrary.in';

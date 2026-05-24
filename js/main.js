@@ -62,6 +62,14 @@ let lastModeLogged = null;
 let lastCameraLogged = null;
 let lastCam1FrameLogged = 0;
 let lastCam2FrameLogged = 0;
+const fpsStats = {
+  lastTsMs: 0,
+  lastCam1Frames: 0,
+  lastCam2Frames: 0,
+  renderAvg: 0,
+  cam1Avg: 0,
+  cam2Avg: 0,
+};
 
 const controller = createRobotController();
 const robot = createRobotConnection();
@@ -79,6 +87,42 @@ function debugLog(event, data = {}) {
 function formatPt(pt) {
   if (!pt) return 'null';
   return `${pt.x},${pt.y}`;
+}
+
+function updateFpsStats(nowMs) {
+  if (!fpsStats.lastTsMs) {
+    fpsStats.lastTsMs = nowMs;
+    fpsStats.lastCam1Frames = cam1.frameCount;
+    fpsStats.lastCam2Frames = cam2.frameCount;
+    return;
+  }
+
+  const dtMs = nowMs - fpsStats.lastTsMs;
+  if (dtMs <= 0) return;
+
+  const cam1Delta = cam1.frameCount - fpsStats.lastCam1Frames;
+  const cam2Delta = cam2.frameCount - fpsStats.lastCam2Frames;
+  const renderInst = 1000 / dtMs;
+  const cam1Inst = (cam1Delta * 1000) / dtMs;
+  const cam2Inst = (cam2Delta * 1000) / dtMs;
+  const alpha = 0.2;
+
+  fpsStats.renderAvg =
+    fpsStats.renderAvg === 0
+      ? renderInst
+      : fpsStats.renderAvg * (1 - alpha) + renderInst * alpha;
+  fpsStats.cam1Avg =
+    fpsStats.cam1Avg === 0
+      ? cam1Inst
+      : fpsStats.cam1Avg * (1 - alpha) + cam1Inst * alpha;
+  fpsStats.cam2Avg =
+    fpsStats.cam2Avg === 0
+      ? cam2Inst
+      : fpsStats.cam2Avg * (1 - alpha) + cam2Inst * alpha;
+
+  fpsStats.lastTsMs = nowMs;
+  fpsStats.lastCam1Frames = cam1.frameCount;
+  fpsStats.lastCam2Frames = cam2.frameCount;
 }
 
 function bootDebugSnapshot() {
@@ -112,6 +156,7 @@ function updateDebugPanel({ tsMs, motion, hudState, selectedCamera }) {
     `camera=${selectedCamera} clutch=${hudState.clutchActive ? 'LOCKED' : 'ACTIVE'}`,
     `neutral=${formatPt(hudState.neutralCenterPx)} leftWrist=${formatPt(hudState.leftWristPx)}`,
     `switchProb=${motion.switchProb.toFixed(2)} vGain=${motion.vGain.toFixed(2)} uDist=${motion.uDist.toFixed(2)}`,
+    `fps(render/c1/c2)=${fpsStats.renderAvg.toFixed(1)}/${fpsStats.cam1Avg.toFixed(1)}/${fpsStats.cam2Avg.toFixed(1)}`,
     `camFrames=${cam1.frameCount}/${cam2.frameCount} camConn=${cam1.connected}/${cam2.connected} camActive=${cam1.active}/${cam2.active}`,
   ].join('\n');
 }
@@ -246,6 +291,7 @@ function loop() {
 
   compositor.resizeToContainer(dom.root);
   const tsMs = Date.now();
+  updateFpsStats(performance.now());
   const results = gesturesReady ? gestures.detectForVideo(tsMs) : null;
   const motion = controller.processHandResults(results, tsMs);
 

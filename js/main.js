@@ -3,6 +3,7 @@
  */
 
 import {
+  APP_DEBUG_VERSION,
   CAMERA_WS_URL,
   CAMERA2_WS_URL,
   HAND_MODEL_PATH,
@@ -82,6 +83,7 @@ function formatPt(pt) {
 
 function bootDebugSnapshot() {
   return {
+    version: APP_DEBUG_VERSION,
     href: window.location.href,
     secureContext: window.isSecureContext,
     mediaDevices: !!navigator.mediaDevices,
@@ -103,6 +105,7 @@ function updateDebugPanel({ tsMs, motion, hudState, selectedCamera }) {
   const ext = dbg.leftExt.map((v) => (v ? '1' : '0')).join('');
 
   debugPanel.textContent = [
+    `version=${APP_DEBUG_VERSION}`,
     `hands=${dbg.handCount} labels=${dbg.labels.join(',') || '-'}`,
     `leftExt=${ext} modeNo=${dbg.leftModeNumber} scores=[${scores}]`,
     `candidate=${dbg.candidateMode} active=${hudState.activeMode}`,

@@ -237,10 +237,13 @@ export function createRobotController() {
       let uDist = 0;
       let switchProb = 1;
 
-      if (results?.handLandmarks?.length) {
-        for (let idx = 0; idx < results.handLandmarks.length; idx++) {
-          const lm = results.handLandmarks[idx];
-          const label = results.handedness[idx][0].categoryName;
+      const landmarks = results?.landmarks ?? results?.handLandmarks ?? [];
+      const handednesses = results?.handednesses ?? results?.handedness ?? [];
+
+      if (landmarks.length) {
+        for (let idx = 0; idx < landmarks.length; idx++) {
+          const lm = landmarks[idx];
+          const label = handednesses[idx]?.[0]?.categoryName;
 
           if (label === 'Right') {
             clutchActive = false;

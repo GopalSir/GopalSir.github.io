@@ -38,7 +38,11 @@ export function createCompositor(canvas) {
     const dh = ih * scale;
     const dx = (w - dw) / 2;
     const dy = (h - dh) / 2;
-    ctx.drawImage(bitmap, dx, dy, dw, dh);
+    try {
+      ctx.drawImage(bitmap, dx, dy, dw, dh);
+    } catch (_) {
+      // bitmap was closed between frame and draw — skip this frame
+    }
   }
 
   function render({ cam1, cam2, hudState, gestureTracker }) {

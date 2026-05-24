@@ -12,7 +12,7 @@ const DEFAULT_ICE_SERVERS = [
   },
 ];
 
-function waitForIceGatheringComplete(pc, timeoutMs = 1500) {
+function waitForIceGatheringComplete(pc, timeoutMs = 5000) {
   if (pc.iceGatheringState === 'complete') {
     return Promise.resolve();
   }
@@ -148,10 +148,18 @@ export function createCameraReceiver(url, label = 'cam', iceServers = DEFAULT_IC
       pc.onconnectionstatechange = () => {
         const state = pc ? pc.connectionState : 'closed';
         setConnected(state === 'connected');
+        console.info(`[${label}] webrtc-state=${state}`);
         if (state === 'failed' && running && ws && ws.readyState === WebSocket.OPEN) {
           setTimeout(() => {
             void negotiate();
           }, 400);
+        }
+        if (state === 'disconnected' && running && ws && ws.readyState === WebSocket.OPEN) {
+          setTimeout(() => {
+            if (pc && pc.connectionState === 'disconnected') {
+              void negotiate();
+            }
+          }, 1200);
         }
       };
 
@@ -210,6 +218,9 @@ export function createCameraReceiver(url, label = 'cam', iceServers = DEFAULT_IC
             type: 'answer',
             sdp: payload.sdp,
           });
+          if (active) {
+            void videoEl.play().catch(() => {});
+          }
         } catch (e) {
           console.error(`[${label}] setRemoteDescription:`, e);
         }
@@ -263,12 +274,6 @@ export function createCameraReceiver(url, label = 'cam', iceServers = DEFAULT_IC
       syncActiveStateToServer();
       if (active) {
         void videoEl.play().catch(() => {});
-      } else {
-        try {
-          videoEl.pause();
-        } catch (_) {
-          /* ignore */
-        }
       }
     },
     get active() {

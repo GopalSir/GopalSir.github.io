@@ -9,6 +9,9 @@ export function createCameraReceiver(url, label = 'cam') {
   let latestBitmap = null;
   let connected = false;
   let frameCount = 0;
+  let active = true;
+  let decoding = false;
+  let pendingFrameB64 = null;
 
   const listeners = new Set();
 
@@ -34,6 +37,23 @@ export function createCameraReceiver(url, label = 'cam') {
     notify();
   }
 
+  async function drainLatestFrame() {
+    if (decoding || !running || !active) return;
+    decoding = true;
+    try {
+      while (running && active && pendingFrameB64) {
+        const b64 = pendingFrameB64;
+        pendingFrameB64 = null;
+        await decodeFrame(b64);
+      }
+    } finally {
+      decoding = false;
+      if (running && active && pendingFrameB64) {
+        void drainLatestFrame();
+      }
+    }
+  }
+
   function connect() {
     if (!running) return;
     if (ws) {
@@ -53,11 +73,15 @@ export function createCameraReceiver(url, label = 'cam') {
       notify();
     };
 
-    ws.onmessage = async (event) => {
+    ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'frame' && data.data) {
-          await decodeFrame(data.data);
+          // Keep only newest frame; older ones are dropped intentionally.
+          pendingFrameB64 = data.data;
+          if (active) {
+            void drainLatestFrame();
+          }
         }
       } catch (e) {
         console.error(`[${label}] frame decode:`, e);
@@ -94,8 +118,18 @@ export function createCameraReceiver(url, label = 'cam') {
       listeners.add(fn);
       return () => listeners.delete(fn);
     },
+    setActive(nextActive) {
+      active = !!nextActive;
+      if (active && pendingFrameB64) {
+        void drainLatestFrame();
+      }
+    },
+    get active() {
+      return active;
+    },
     stop() {
       running = false;
+      pendingFrameB64 = null;
       clearTimeout(reconnectTimer);
       if (ws) {
         try {

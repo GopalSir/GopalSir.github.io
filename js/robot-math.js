@@ -24,6 +24,11 @@ export const MODE_SWITCH_COOLDOWN_MS = 180;
 export const ROBOT_SEND_PERIOD_S = 0.04;
 export const ENABLE_GRIPPER_ACTIONS = true;
 export const NEUTRAL_FOLLOW_ALPHA = 0.2;
+export const DEFAULT_CALIBRATION = Object.freeze({
+  roll: 0,
+  pitch: 0,
+  yaw: 90,
+});
 
 export function clamp01(x) {
   return Math.max(0, Math.min(1, x));
@@ -130,7 +135,10 @@ export function matVecMul(M, v) {
 export function computeTransform(rollDeg, pitchDeg, yawDeg) {
   const roll = (rollDeg * Math.PI) / 180;
   const pitch = (pitchDeg * Math.PI) / 180;
-  const yaw = (yawDeg * Math.PI) / 180;
+  // Screen-space gesture axes (selfie-style camera feed) are mirrored relative
+  // to the robot base right-handed frame. Use opposite yaw sign so a physical
+  // +90 deg side-view camera calibration behaves intuitively for operators.
+  const yaw = (-yawDeg * Math.PI) / 180;
   const R = matMul(matMul(rotZ(yaw), rotY(pitch)), rotX(roll));
   const flip = [
     [-1, 0, 0],
@@ -201,8 +209,12 @@ export function createRobotController() {
     lastGripperState: 'OPEN',
     gripperOpenStopDeadline: null,
     manualStopHold: false,
-    calibration: { roll: 0, pitch: 0, yaw: 0 },
-    R_cam_to_base: computeTransform(0, 0, 0),
+    calibration: { ...DEFAULT_CALIBRATION },
+    R_cam_to_base: computeTransform(
+      DEFAULT_CALIBRATION.roll,
+      DEFAULT_CALIBRATION.pitch,
+      DEFAULT_CALIBRATION.yaw
+    ),
     recomputeTransform() {
       const { roll, pitch, yaw } = this.calibration;
       this.R_cam_to_base = computeTransform(roll, pitch, yaw);

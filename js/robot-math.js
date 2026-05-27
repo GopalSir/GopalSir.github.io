@@ -69,7 +69,7 @@ export function velocityForModeMmS(mode, dx, dy) {
     vy = -MAX_LINEAR_SPEED_MM_S * gain * ux;
     vz = -MAX_LINEAR_SPEED_MM_S * gain * uy;
   } else if (mode === 'X Axis') {
-    vx = MAX_LINEAR_SPEED_MM_S * gain * ux;
+    vx = MAX_LINEAR_SPEED_MM_S * gain * -ux;
   } else if (mode === 'Yaw/Pitch') {
     wz = MAX_ANGULAR_SPEED_RAD_S * gain * ux;
     wy = -MAX_ANGULAR_SPEED_RAD_S * gain * uy;
@@ -135,10 +135,7 @@ export function matVecMul(M, v) {
 export function computeTransform(rollDeg, pitchDeg, yawDeg) {
   const roll = (rollDeg * Math.PI) / 180;
   const pitch = (pitchDeg * Math.PI) / 180;
-  // Screen-space gesture axes (selfie-style camera feed) are mirrored relative
-  // to the robot base right-handed frame. Use opposite yaw sign so a physical
-  // +90 deg side-view camera calibration behaves intuitively for operators.
-  const yaw = (-yawDeg * Math.PI) / 180;
+  const yaw = (yawDeg * Math.PI) / 180;
   const R = matMul(matMul(rotZ(yaw), rotY(pitch)), rotX(roll));
   const flip = [
     [-1, 0, 0],

@@ -2,15 +2,15 @@
  * HUD overlay — port of draw_hud() in bimanual_pi_client2_camera.py.
  */
 
-import { DEADZONE_RADIUS_NORM, isInsideDeadzone } from './robot-math.js';
-import { REF_WIDTH, REF_HEIGHT } from './config.js';
+import { DEADZONE_RADIUS_PX } from './robot-math.js';
+import { REF_WIDTH } from './config.js';
 import { drawModeGizmo } from './gizmo.js';
 
 function scalePt(pt, w, h) {
   if (!pt) return null;
   return {
     x: Math.round((pt.x * w) / REF_WIDTH),
-    y: Math.round((pt.y * h) / REF_HEIGHT),
+    y: Math.round((pt.y * h) / 1080),
   };
 }
 
@@ -25,41 +25,30 @@ function bgrStroke(ctx, b, g, r, alpha = 1) {
 export function drawHud(ctx, w, h, state) {
   const nc = scalePt(state.neutralCenterPx, w, h);
   const lw = scalePt(state.leftWristPx, w, h);
-  const dzRx = DEADZONE_RADIUS_NORM * w;
-  const dzRy = DEADZONE_RADIUS_NORM * h;
-  const dzR = Math.round((dzRx + dzRy) / 2);
+  const dzRadius = Math.round((DEADZONE_RADIUS_PX * w) / REF_WIDTH);
 
   if (nc) {
     const circleActive = !state.clutchActive;
     bgrFill(ctx, 0, 255, 0, circleActive ? 0.25 : 0);
     if (!circleActive) bgrFill(ctx, 0, 0, 255, 0.25);
     ctx.beginPath();
-    ctx.ellipse(nc.x, nc.y, dzRx, dzRy, 0, 0, Math.PI * 2);
+    ctx.arc(nc.x, nc.y, dzRadius, 0, Math.PI * 2);
     ctx.fill();
 
     if (circleActive) bgrStroke(ctx, 0, 255, 0, 1);
     else bgrStroke(ctx, 0, 0, 255, 1);
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.ellipse(nc.x, nc.y, dzRx, dzRy, 0, 0, Math.PI * 2);
+    ctx.arc(nc.x, nc.y, dzRadius, 0, Math.PI * 2);
     ctx.stroke();
 
-    if (
-      !state.clutchActive &&
-      lw &&
-      state.neutralCenterPx &&
-      state.leftWristPx
-    ) {
-      const dx = state.leftWristPx.x - state.neutralCenterPx.x;
-      const dy = state.leftWristPx.y - state.neutralCenterPx.y;
-      if (!isInsideDeadzone(dx, dy)) {
-        bgrStroke(ctx, 255, 255, 0, 1);
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.moveTo(nc.x, nc.y);
-        ctx.lineTo(lw.x, lw.y);
-        ctx.stroke();
-      }
+    if (!state.clutchActive && lw) {
+      bgrStroke(ctx, 255, 255, 0, 1);
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(nc.x, nc.y);
+      ctx.lineTo(lw.x, lw.y);
+      ctx.stroke();
     }
   }
 
@@ -101,6 +90,6 @@ export function drawHud(ctx, w, h, state) {
   drawText(`VIEW: ${camLabel}`, 180, 180, 180);
 
   if (nc) {
-    drawModeGizmo(ctx, state.activeMode, nc, dzR);
+    drawModeGizmo(ctx, state.activeMode, nc, dzRadius);
   }
 }

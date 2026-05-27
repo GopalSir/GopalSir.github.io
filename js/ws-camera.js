@@ -4,6 +4,9 @@
  * Signaling URL is still CAMERA_WS_URL / CAMERA2_WS_URL so existing tunnel
  * ingress can stay the same; payload is now SDP offer/answer JSON instead of
  * per-frame JPEG blobs.
+ *
+ * Both camera peers stay at full send rate; mode changes only switch which
+ * video element the compositor draws (no server pause/resume).
  */
 
 const DEFAULT_ICE_SERVERS = [
@@ -44,8 +47,6 @@ export function createCameraReceiver(url, label = 'cam', iceServers = DEFAULT_IC
   let running = true;
   let connected = false;
   let frameCount = 0;
-  let active = true;
-  let lastSentActive = null;
   let negotiating = false;
   let lastFallbackVideoTime = -1;
   let frameCallbackArmed = false;
@@ -105,14 +106,6 @@ export function createCameraReceiver(url, label = 'cam', iceServers = DEFAULT_IC
     }
   }
 
-  function syncActiveStateToServer() {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    if (lastSentActive === active) return;
-    if (sendSignal({ type: active ? 'resume' : 'pause' })) {
-      lastSentActive = active;
-    }
-  }
-
   function closePeer() {
     if (pc) {
       try {
@@ -139,9 +132,7 @@ export function createCameraReceiver(url, label = 'cam', iceServers = DEFAULT_IC
         if (stream && videoEl.srcObject !== stream) {
           videoEl.srcObject = stream;
         }
-        if (active) {
-          void videoEl.play().catch(() => {});
-        }
+        void videoEl.play().catch(() => {});
         startFrameCounter();
       };
 
@@ -171,7 +162,6 @@ export function createCameraReceiver(url, label = 'cam', iceServers = DEFAULT_IC
         type: 'offer',
         sdp: pc.localDescription ? pc.localDescription.sdp : offer.sdp,
       });
-      syncActiveStateToServer();
     } catch (e) {
       console.error(`[${label}] negotiate:`, e);
     } finally {
@@ -183,7 +173,6 @@ export function createCameraReceiver(url, label = 'cam', iceServers = DEFAULT_IC
     if (!running) return;
     closePeer();
     setConnected(false);
-    lastSentActive = null;
 
     if (ws) {
       try {
@@ -218,9 +207,7 @@ export function createCameraReceiver(url, label = 'cam', iceServers = DEFAULT_IC
             type: 'answer',
             sdp: payload.sdp,
           });
-          if (active) {
-            void videoEl.play().catch(() => {});
-          }
+          void videoEl.play().catch(() => {});
         } catch (e) {
           console.error(`[${label}] setRemoteDescription:`, e);
         }
@@ -241,7 +228,6 @@ export function createCameraReceiver(url, label = 'cam', iceServers = DEFAULT_IC
 
     ws.onclose = () => {
       setConnected(false);
-      lastSentActive = null;
       clearInterval(pingTimer);
       pingTimer = null;
       closePeer();
@@ -266,18 +252,6 @@ export function createCameraReceiver(url, label = 'cam', iceServers = DEFAULT_IC
     onUpdate(fn) {
       listeners.add(fn);
       return () => listeners.delete(fn);
-    },
-    setActive(nextActive) {
-      const newActive = !!nextActive;
-      if (newActive === active) return;
-      active = newActive;
-      syncActiveStateToServer();
-      if (active) {
-        void videoEl.play().catch(() => {});
-      }
-    },
-    get active() {
-      return active;
     },
     stop() {
       running = false;

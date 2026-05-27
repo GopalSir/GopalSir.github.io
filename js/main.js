@@ -175,7 +175,7 @@ function updateDebugPanel({ tsMs, motion, hudState, selectedCamera }) {
     `neutral=${formatPt(hudState.neutralCenterPx)} leftWrist=${formatPt(hudState.leftWristPx)}`,
     `switchProb=${motion.switchProb.toFixed(2)} vGain=${motion.vGain.toFixed(2)} uDist=${motion.uDist.toFixed(2)}`,
     `fps(render/c1/c2/det)=${fpsStats.renderAvg.toFixed(1)}/${fpsStats.cam1Avg.toFixed(1)}/${fpsStats.cam2Avg.toFixed(1)}/${fpsStats.detectAvg.toFixed(1)}`,
-    `camFrames=${cam1.frameCount}/${cam2.frameCount} camConn=${cam1.connected}/${cam2.connected} camActive=${cam1.active}/${cam2.active}`,
+    `camFrames=${cam1.frameCount}/${cam2.frameCount} camConn=${cam1.connected}/${cam2.connected} viewCam=${selectedCamera}`,
   ].join('\n');
 }
 
@@ -356,8 +356,6 @@ function loop() {
     manualStopHold: controller.manualStopHold,
   };
   const selectedCamera = cameraIndexForMode(hudState.activeMode);
-  cam1.setActive(selectedCamera === 1);
-  cam2.setActive(selectedCamera === 2);
 
   if (hudState.activeMode !== lastModeLogged) {
     lastModeLogged = hudState.activeMode;

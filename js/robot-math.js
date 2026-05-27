@@ -2,6 +2,11 @@
  * Port of bimanual_pi_client2_camera.py math (lines 32-223, 367-411).
  */
 
+import { REF_WIDTH, REF_HEIGHT } from './config.js';
+
+/** Scale dy into 1920×1080 isotropic space so deadzone/gain match dx. */
+const REF_Y_TO_ISO_X = REF_WIDTH / REF_HEIGHT;
+
 export const EMA_ALPHA = 0.3;
 export const EXT_ON_THRESH = 0.68;
 export const EXT_OFF_THRESH = 0.55;
@@ -40,7 +45,8 @@ export function expGain(u, alpha = VELOCITY_EXP_ALPHA) {
 }
 
 export function normalizeOffsetFromNeutral(dx, dy) {
-  const r = Math.sqrt(dx * dx + dy * dy);
+  const dyIso = dy * REF_Y_TO_ISO_X;
+  const r = Math.hypot(dx, dyIso);
   const u =
     (r - DEADZONE_RADIUS_PX) /
     Math.max(1, SATURATION_RADIUS_PX - DEADZONE_RADIUS_PX);
@@ -63,8 +69,9 @@ export function velocityForModeMmS(mode, dx, dy) {
     return { vx, vy, vz, wx, wy, wz, gain: 0, u };
   }
   const gain = expGain(u);
+  const dyIso = dy * REF_Y_TO_ISO_X;
   const ux = dx / (r + 1e-6);
-  const uy = dy / (r + 1e-6);
+  const uy = dyIso / (r + 1e-6);
   if (mode === 'YZ Plane') {
     vy = -MAX_LINEAR_SPEED_MM_S * gain * ux;
     vz = -MAX_LINEAR_SPEED_MM_S * gain * uy;

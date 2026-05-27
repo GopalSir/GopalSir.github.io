@@ -11,6 +11,10 @@ import {
 
 const INIT_TIMEOUT_MS = 45000;
 const DETECT_MAX_WIDTH = 640;
+const PIP_SIZE_FROM_SHORT_EDGE = 0.28;
+const PIP_MIN_WIDTH_PX = 240;
+const PIP_MAX_WIDTH_RATIO = 0.32;
+const PIP_MARGIN_RATIO = 0.02;
 
 function withTimeout(promise, ms, label) {
   return Promise.race([
@@ -142,9 +146,14 @@ export function createGestureTracker() {
 
   function drawPip(ctx, canvasW, canvasH) {
     if (!ready || videoEl.readyState < 2) return;
-    const pipW = Math.round(canvasW * 0.15);
-    const pipH = Math.round(pipW * (9 / 16));
-    const margin = Math.round(canvasW * 0.02);
+    const shortEdge = Math.min(canvasW, canvasH);
+    const pipTargetW = Math.round(shortEdge * PIP_SIZE_FROM_SHORT_EDGE);
+    const pipMaxW = Math.round(canvasW * PIP_MAX_WIDTH_RATIO);
+    const pipW = Math.max(PIP_MIN_WIDTH_PX, Math.min(pipTargetW, pipMaxW));
+    const videoAspect =
+      (videoEl.videoHeight || REF_HEIGHT) / (videoEl.videoWidth || REF_WIDTH);
+    const pipH = Math.round(pipW * videoAspect);
+    const margin = Math.max(8, Math.round(canvasW * PIP_MARGIN_RATIO));
     const x = canvasW - pipW - margin;
     const y = margin;
 

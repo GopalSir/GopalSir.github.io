@@ -4,9 +4,6 @@
 
 import { REF_WIDTH, REF_HEIGHT } from './config.js';
 
-/** Scale dy into 1920×1080 isotropic space so deadzone/gain match dx. */
-const REF_Y_TO_ISO_X = REF_WIDTH / REF_HEIGHT;
-
 export const EMA_ALPHA = 0.3;
 export const EXT_ON_THRESH = 0.68;
 export const EXT_OFF_THRESH = 0.55;
@@ -19,6 +16,9 @@ export const MAX_LINEAR_SPEED_MM_S = 50.0;
 export const MAX_ANGULAR_SPEED_RAD_S = 0.8;
 export const DEADZONE_RADIUS_PX = 100.0;
 export const SATURATION_RADIUS_PX = 360.0;
+/** Normalized image coords (0–1): equal L/R vs U/D gain; matches HUD boundary. */
+export const DEADZONE_RADIUS_NORM = DEADZONE_RADIUS_PX / REF_WIDTH;
+export const SATURATION_RADIUS_NORM = SATURATION_RADIUS_PX / REF_WIDTH;
 export const VELOCITY_EXP_ALPHA = 4.0;
 export const VELOCITY_EMA_ALPHA = 0.3;
 
@@ -44,13 +44,30 @@ export function expGain(u, alpha = VELOCITY_EXP_ALPHA) {
   return (Math.exp(alpha * clamp01(u)) - 1) / (Math.exp(alpha) - 1);
 }
 
-export function normalizeOffsetFromNeutral(dx, dy) {
-  const dyIso = dy * REF_Y_TO_ISO_X;
-  const r = Math.hypot(dx, dyIso);
+/** Normalized offset from neutral (matches HUD ellipse on any canvas aspect). */
+export function motionOffsetNorm(dx, dy) {
+  const ndx = dx / REF_WIDTH;
+  const ndy = dy / REF_HEIGHT;
+  const rNorm = Math.hypot(ndx, ndy);
   const u =
-    (r - DEADZONE_RADIUS_PX) /
-    Math.max(1, SATURATION_RADIUS_PX - DEADZONE_RADIUS_PX);
-  return { r, u: clamp01(u) };
+    (rNorm - DEADZONE_RADIUS_NORM) /
+    Math.max(1e-6, SATURATION_RADIUS_NORM - DEADZONE_RADIUS_NORM);
+  return {
+    ndx,
+    ndy,
+    rNorm,
+    u: clamp01(u),
+    insideDeadzone: rNorm <= DEADZONE_RADIUS_NORM,
+  };
+}
+
+export function isInsideDeadzone(dx, dy) {
+  return motionOffsetNorm(dx, dy).insideDeadzone;
+}
+
+export function normalizeOffsetFromNeutral(dx, dy) {
+  const { rNorm, u } = motionOffsetNorm(dx, dy);
+  return { r: rNorm * REF_WIDTH, u };
 }
 
 export function switchProbabilityFromGain(vGain) {
@@ -64,14 +81,13 @@ export function velocityForModeMmS(mode, dx, dy) {
   let wx = 0;
   let wy = 0;
   let wz = 0;
-  const { r, u } = normalizeOffsetFromNeutral(dx, dy);
-  if (r <= DEADZONE_RADIUS_PX) {
-    return { vx, vy, vz, wx, wy, wz, gain: 0, u };
+  const { ndx, ndy, rNorm, u, insideDeadzone } = motionOffsetNorm(dx, dy);
+  if (insideDeadzone || rNorm <= 0) {
+    return { vx, vy, vz, wx, wy, wz, gain: 0, u: 0 };
   }
   const gain = expGain(u);
-  const dyIso = dy * REF_Y_TO_ISO_X;
-  const ux = dx / (r + 1e-6);
-  const uy = dyIso / (r + 1e-6);
+  const ux = ndx / rNorm;
+  const uy = ndy / rNorm;
   if (mode === 'YZ Plane') {
     vy = -MAX_LINEAR_SPEED_MM_S * gain * ux;
     vz = -MAX_LINEAR_SPEED_MM_S * gain * uy;
@@ -389,20 +405,25 @@ export function createRobotController() {
       ) {
         const dx = leftWristPx.x - this.neutralCenterPx.x;
         const dy = leftWristPx.y - this.neutralCenterPx.y;
-        const norm = normalizeOffsetFromNeutral(dx, dy);
+        const norm = motionOffsetNorm(dx, dy);
         uDist = norm.u;
-        vGain = expGain(uDist);
+        vGain = norm.insideDeadzone ? 0 : expGain(uDist);
         switchProb = switchProbabilityFromGain(vGain);
         this.maybeUpdateActiveMode(rightMode, switchProb, tsMs);
-        const vel = velocityForModeMmS(this.activeMode, dx, dy);
-        [vx, vy, vz, wx, wy, wz] = this.smoothVelocityCommand(
-          vel.vx,
-          vel.vy,
-          vel.vz,
-          vel.wx,
-          vel.wy,
-          vel.wz
-        );
+        if (norm.insideDeadzone) {
+          this.velCmd = { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 };
+          vx = vy = vz = wx = wy = wz = 0;
+        } else {
+          const vel = velocityForModeMmS(this.activeMode, dx, dy);
+          [vx, vy, vz, wx, wy, wz] = this.smoothVelocityCommand(
+            vel.vx,
+            vel.vy,
+            vel.vz,
+            vel.wx,
+            vel.wy,
+            vel.wz
+          );
+        }
       } else {
         [vx, vy, vz, wx, wy, wz] = this.smoothVelocityCommand(
           0,
